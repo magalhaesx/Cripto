@@ -5,6 +5,7 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { COINS as BASE } from '../js/coins.js';
 import { analyze, applyBreadth, PARAMS } from '../js/analysis.js';
 import { STUDY } from '../js/study.js';
+import { firstHit, expandPos, exitMessage } from '../js/positions.js';
 import { VAPID_PUBLIC_KEY } from '../js/config.js';
 
 const BASES = ['https://data-api.binance.vision/api/v3', 'https://api.binance.com/api/v3'];
@@ -12,11 +13,11 @@ const STATE_FILE = '.state/notified.json';
 const COOLDOWN_H = Number(process.env.COOLDOWN_HOURS || 24);
 const SITE = process.env.SITE_URL || './';
 
-async function klines(sym) {
+async function klines(sym, interval = '1d', extra = '') {
   let err;
   for (const b of BASES) {
     try {
-      const r = await fetch(`${b}/klines?symbol=${sym}USDT&interval=1d&limit=1000`);
+      const r = await fetch(`${b}/klines?symbol=${sym}USDT&interval=${interval}&limit=1000${extra}`);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       return (await r.json()).map(k => ({ t: +k[0], o: +k[1], h: +k[2], l: +k[3], c: +k[4], v: +k[7] }));
     } catch (e) { err = e; }
@@ -101,4 +102,31 @@ else {
   }
   for (const sym of sentCoins) state[sym] = now;
 }
+
+// ---------------------------------------------------------------------------
+// Avisos de venda das compras simuladas (stop, alvo e prazo)
+// ---------------------------------------------------------------------------
+if (VAPID_PRIVATE_KEY) webpush.setVapidDetails(VAPID_SUBJECT || (SITE.startsWith('https') ? SITE : 'mailto:radar-cripto@users.noreply.github.com'), VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
+let posCount = 0;
+for (const sub of subs) {
+  for (const raw of sub.radar?.pos || []) {
+    const p = expandPos(raw); posCount++;
+    if (state[`pos:${p.id}:done`]) continue;
+    try {
+      const ks = await klines(p.sym, '1h', `&startTime=${p.at - 36e5}`);
+      const hit = firstHit(p, ks);
+      const last = ks.at(-1)?.c;
+      let ev = hit ? hit.type : (Date.now() >= p.exp ? 'expire' : null);
+      if (!ev || state[`pos:${p.id}:${ev}`]) continue;
+      const name = COINS.find(c => c.sym === p.sym)?.name || p.sym;
+      const msg = exitMessage(ev, p, name, hit ? hit.price : last);
+      console.log(`Compra simulada ${p.sym} (${p.id}): ${ev}`);
+      if (!VAPID_PRIVATE_KEY) continue;
+      await webpush.sendNotification({ endpoint: sub.endpoint, keys: sub.keys }, JSON.stringify({ ...msg, url: `${SITE}?tab=sim`, tag: `pos-${p.id}-${ev}` }), { TTL: 12 * 3600, urgency: 'high' });
+      state[`pos:${p.id}:${ev}`] = now;
+      if (ev !== 'expire') state[`pos:${p.id}:done`] = now;
+    } catch (e) { console.error(`Compra simulada ${p.sym}: erro ${e.statusCode || e.message}`); }
+  }
+}
+console.log(`Compras simuladas verificadas: ${posCount}.`);
 saveState(state);

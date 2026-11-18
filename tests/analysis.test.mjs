@@ -52,3 +52,18 @@ test('simulação cai para o estudo quando a moeda tem poucos casos', () => {
 test('estudo embutido tem vantagem sobre um dia qualquer', () => {
   assert.ok(STUDY.events > 300 && STUDY.winRate > STUDY.baseWinRate);
 });
+
+import { firstHit, compactPos, expandPos } from '../js/positions.js';
+test('saída: detecta o que foi tocado primeiro', () => {
+  const pos = { at: 0, entry: 100, stop: 90, target: 110 };
+  const k = (t, l, h) => ({ t, l, h, c: (l + h) / 2 });
+  assert.equal(firstHit(pos, [k(0, 95, 105), k(36e5, 97, 111), k(72e5, 85, 100)]).type, 'target');
+  assert.equal(firstHit(pos, [k(0, 95, 105), k(36e5, 89, 104)]).type, 'stop');
+  assert.equal(firstHit(pos, [k(0, 89, 111)]).type, 'stop');          // mesma vela: conservador
+  assert.equal(firstHit(pos, [k(0, 95, 105)]), null);
+  assert.equal(firstHit({ ...pos, at: 72e5 }, [k(0, 50, 200), k(72e5, 95, 105)]), null); // antes da compra não conta
+});
+test('posição compacta ida e volta', () => {
+  const p = { id: 'x', sym: 'BTC', entry: 100, stop: 90, target: 110, at: 1, exp: 2 };
+  assert.deepEqual(expandPos(compactPos(p)), p);
+});

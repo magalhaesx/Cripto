@@ -30,8 +30,8 @@ export const RANGES = {
   'TUDO': { interval: '1w', limit: 1000 },
 };
 
-export async function fetchKlines(sym, interval, limit) {
-  const raw = await binance(`/klines?symbol=${sym}USDT&interval=${interval}&limit=${limit}`);
+export async function fetchKlines(sym, interval, limit, startTime) {
+  const raw = await binance(`/klines?symbol=${sym}USDT&interval=${interval}&limit=${limit}${startTime ? `&startTime=${startTime}` : ''}`);
   return raw.map(k => ({ t: +k[0], o: +k[1], h: +k[2], l: +k[3], c: +k[4], v: +k[7] /* volume em USDT */ }));
 }
 

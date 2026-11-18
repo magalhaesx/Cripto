@@ -1,6 +1,7 @@
 import { COINS as BASE_COINS, colorFor } from './coins.js';
 import { analyze, simulate, applyBreadth, PARAMS } from './analysis.js';
 import { STUDY } from './study.js';
+import { firstHit, compactPos, exitMessage } from './positions.js';
 import { fetchDaily, fetchKlines, fetchTickers24h, fetchUsdBrl, fetchMarkets, connectLive, fetchAllUsdtSymbols, RANGES } from './api.js';
 import { PriceChart, drawSpark, drawHistogram, drawScoreRing, scoreColor } from './chart.js';
 import { VAPID_PUBLIC_KEY } from './config.js';
@@ -281,33 +282,133 @@ function renderSignals() {
     ${COINS.filter(c => S.analysis[c.sym] && !S.analysis[c.sym].ok).map(c => `<div class="note">${c.sym}: ${esc(S.analysis[c.sym].reason)}</div>`).join('')}`;
 }
 
+// ---------------------------------------------------------------------------
+// Compras simuladas: stop, alvo, prazo e avisos de venda
+// ---------------------------------------------------------------------------
+const H_MS = () => PARAMS.horizon * 864e5;
+function migratePositions() {
+  let changed = false;
+  for (const p of S.positions) {
+    if (!p.id) { p.id = (p.at || Date.now()).toString(36) + Math.random().toString(36).slice(2, 5); changed = true; }
+    if (!p.stop || !p.target) {
+      const atr = S.analysis[p.sym]?.atrPct ?? 0.05;
+      p.stop = p.entry * (1 - 2 * atr); p.target = p.entry * (1 + 2 * atr); changed = true;
+    }
+    if (!p.exp) { p.exp = p.at + H_MS(); changed = true; }
+    if (!p.status) { p.status = 'open'; changed = true; }
+    p.alerts ||= {};
+  }
+  if (changed) savePositions();
+}
+const savePositions = () => store.set('positions', S.positions);
+const localRate = p => (p.cur === 'BRL' ? (S.rate || p.rate) : 1);
+const posValue = (p, usdPrice, rate = localRate(p)) => p.qty * usdPrice * rate * (1 - PARAMS.costPct / 2);
+
+async function alertPosition(p, type, priceUsd) {
+  if (p.alerts[type]) return;
+  p.alerts[type] = Date.now();
+  if (type !== 'expire') { p.status = type; p.hitPrice = priceUsd; p.hitAt = Date.now(); }
+  savePositions();
+  const c = coinBySym[p.sym];
+  const { title, body } = exitMessage(type, p, c?.name || p.sym, priceUsd);
+  toast(`<b>${esc(title)}</b><br><span class="muted">${esc(body)}</span>`, () => { closeDetail(); switchView('sim'); });
+  navigator.vibrate?.([30, 60, 30]);
+  if ('Notification' in window && Notification.permission === 'granted') {
+    const reg = await navigator.serviceWorker?.getRegistration();
+    reg?.showNotification(title, { body, icon: 'icons/icon-192.png', badge: 'icons/icon-192.png', tag: `pos-${p.id}-${type}`, data: { url: './?tab=sim' } });
+  }
+  if (S.view === 'sim') renderSim();
+}
+
+// ao vivo (a cada preço novo)
+let lastPosCheck = 0;
+function checkPositions(force) {
+  if (!force && Date.now() - lastPosCheck < 1500) return;
+  lastPosCheck = Date.now();
+  for (const p of S.positions) {
+    if (p.status !== 'open') continue;
+    const cur = S.tickers[p.sym]?.price; if (!cur) continue;
+    if (cur <= p.stop) alertPosition(p, 'stop', cur);
+    else if (cur >= p.target) alertPosition(p, 'target', cur);
+    else if (Date.now() >= p.exp) alertPosition(p, 'expire', cur);
+  }
+}
+
+// ao abrir o app: confere o que aconteceu enquanto ele estava fechado (velas de 1h desde a compra)
+async function reconcilePositions() {
+  for (const p of S.positions.filter(p => p.status === 'open')) {
+    try {
+      const ks = await fetchKlines(p.sym, '1h', 1000, p.at - 36e5);
+      const hit = firstHit(p, ks);
+      if (hit) alertPosition(p, hit.type, hit.price);
+    } catch {}
+  }
+  checkPositions(true);
+}
+
+function rangeBar(p, cur) {
+  const f = x => Math.max(0, Math.min(1, (x - p.stop) / (p.target - p.stop))) * 100;
+  return `<div class="pos-range"><i class="entry" style="left:${f(p.entry)}%"></i>${cur ? `<b class="now ${cur >= p.entry ? 'up' : 'down'}" style="left:${f(cur)}%"></b>` : ''}</div>
+    <div class="pos-legend"><span class="down">🛑 ${money(p.stop)} (${pct(p.stop / p.entry - 1, 1)})</span><span class="up">🎯 ${money(p.target)} (${pct(p.target / p.entry - 1, 1)})</span></div>`;
+}
+
+const STATUS = {
+  open: ['ABERTA', 'neutral'], target: ['🎯 ALVO ATINGIDO', 'buy'], stop: ['🛑 STOP ATINGIDO', 'avoid'], sold: ['VENDIDA', 'neutral'],
+};
+
 function renderSim() {
   const el = $('#view-sim');
-  const pos = S.positions;
+  if (document.activeElement?.closest?.('#view-sim .pos-edit')) return; // não atrapalhar quem está digitando
+  const active = S.positions.filter(p => p.status !== 'sold');
+  const sold = S.positions.filter(p => p.status === 'sold');
   let inv = 0, val = 0;
-  const rows = pos.map((p, idx) => {
-    const c = coinBySym[p.sym]; const cur = price(p.sym);
-    const valueLocal = cur ? p.qty * cur * (p.cur === 'BRL' ? (S.rate || p.rate) : 1) : null;
-    const valueOut = valueLocal != null ? valueLocal * (1 - PARAMS.costPct / 2) : null;
-    inv += p.amount; val += valueOut ?? p.amount;
-    const pl = valueOut != null ? valueOut - p.amount : 0;
-    return `<div class="row pos">
-      ${coinIcon(c)}
-      <div class="meta" data-open="${p.sym}"><div class="name">${c.sym} <span class="muted" style="font-size:12px;font-weight:500">${qty(p.qty, '')}</span></div>
-        <div class="sub">Entrada ${p.cur === 'BRL' ? 'R$' : 'US$'} ${(p.entry * (p.cur === 'BRL' ? p.rate : 1)).toLocaleString('pt-BR', { maximumSignificantDigits: 6 })} · ${fmtDate(p.at)}</div></div>
-      <div class="right"><div class="price num">${moneyLocal(valueOut)}</div>
-        <div class="chg num ${cls(pl)}">${moneyLocal(pl, true)} (${pct(pl / p.amount)})</div>
-        <button class="del" data-del="${idx}">remover</button></div>
+  const cards = active.map(p => {
+    const c = coinBySym[p.sym] || { sym: p.sym, name: p.sym, color: colorFor(p.sym) };
+    const cur = price(p.sym);
+    const v = cur ? posValue(p, cur) : null;
+    inv += p.amount; val += v ?? p.amount;
+    const pl = v != null ? v - p.amount : 0;
+    const [label, kls] = STATUS[p.status];
+    const left = p.exp - Date.now();
+    const timeTxt = left > 0 ? `prazo: ${left > 864e5 ? `${Math.ceil(left / 864e5)} dias` : `${Math.ceil(left / 36e5)} h`}` : '⏰ prazo de 7 dias encerrado';
+    const hit = p.status === 'target' || p.status === 'stop';
+    const hitVal = hit ? posValue(p, p.hitPrice) : null;
+    return `<div class="pos-card${hit ? ` hit-${p.status}` : ''}">
+      <div class="pos-top">${coinIcon(c)}
+        <div class="meta" data-open="${p.sym}"><div class="name">${c.sym} <span class="chip ${kls}">${label}</span></div>
+          <div class="sub">${moneyLocal(p.amount)} em ${fmtDate(p.at)} · entrada ${money(p.entry)}</div></div>
+        <div class="right"><div class="price num">${moneyLocal(v)}</div><div class="chg num ${cls(pl)}">${moneyLocal(pl, true)} (${pct(pl / p.amount)})</div></div>
+      </div>
+      ${rangeBar(p, cur)}
+      <div class="pos-foot"><span class="muted">${timeTxt}</span><span class="muted">${p.alerts.expire && !hit ? 'reavalie a posição' : ''}</span></div>
+      ${hit ? `<div class="pos-hit">${p.status === 'target' ? '🎯 Bateu o alvo' : '🛑 Bateu o stop'} em ${money(p.hitPrice)}. Vendendo nesse preço: <b class="${cls(hitVal - p.amount)}">${moneyLocal(hitVal - p.amount, true)}</b></div>` : ''}
+      ${S.editPos === p.id ? `<div class="pos-edit">
+          <label>Stop (% abaixo da entrada)<input data-edit="stop" data-id="${p.id}" inputmode="decimal" value="${(Math.abs(p.stop / p.entry - 1) * 100).toFixed(1).replace('.', ',')}"></label>
+          <label>Alvo (% acima da entrada)<input data-edit="target" data-id="${p.id}" inputmode="decimal" value="${((p.target / p.entry - 1) * 100).toFixed(1).replace('.', ',')}"></label>
+          <button class="chip buy" data-editdone="1" style="padding:8px 14px">OK</button></div>` : ''}
+      <div class="pos-actions">
+        ${hit ? `<button class="chip buy" data-sell="${p.id}" data-at="hit">Registrar venda a ${money(p.hitPrice)}</button>` : `<button class="chip buy" data-sell="${p.id}">Vender agora</button>`}
+        ${hit ? '' : `<button class="chip neutral" data-editpos="${p.id}">Ajustar stop/alvo</button>`}
+        <button class="chip neutral" data-delpos="${p.id}">remover</button>
+      </div>
     </div>`;
   });
+  const realized = sold.reduce((s, p) => s + (p.soldValue - p.amount), 0);
   const pl = val - inv;
   el.innerHTML = `
     <div class="balance"><div class="muted">Carteira simulada (valor de venda agora)</div>
       <div class="big num">${moneyLocal(val)}</div>
-      <div class="pl num ${cls(pl)}">${moneyLocal(pl, true)} · ${inv ? pct(pl / inv) : '0,00%'}</div></div>
-    ${pos.length ? `<div class="list">${rows.join('')}</div>`
-      : `<div class="empty" style="margin-top:12px"><b>Nenhuma compra simulada.</b> Abra uma moeda e toque em <b>“Simular compra agora”</b> para acompanhar, em tempo real, quanto você estaria ganhando ou perdendo — sem gastar nada.</div>`}
-    <p class="note">Valores atualizados ao vivo. Já descontamos ${(PARAMS.costPct * 100).toFixed(1).replace('.', ',')}% de taxas (compra + venda). Simulações não são dinheiro real.</p>`;
+      <div class="pl num ${cls(pl)}">${moneyLocal(pl, true)} · ${inv ? pct(pl / inv) : '0,00%'}</div>
+      ${sold.length ? `<div class="muted" style="margin-top:4px;font-size:13px">Vendas registradas: <b class="${cls(realized)}">${moneyLocal(realized, true)}</b></div>` : ''}</div>
+    ${pushCfgStale() ? `<div class="err" style="background:rgba(255,209,102,.12);color:var(--gold)">⚠️ Para receber avisos de stop/alvo com o app fechado, atualize o código do aparelho no GitHub. <button class="chip watch" data-goto="settings" style="margin-top:6px">Ir para Ajustes</button></div>` : ''}
+    ${active.length ? cards.join('')
+      : `<div class="empty" style="margin-top:12px"><b>Nenhuma compra simulada aberta.</b> Abra uma moeda e toque em <b>“Simular compra agora”</b>. O app define um <b>stop</b> (para limitar a perda) e um <b>alvo</b> (para realizar o lucro) e te avisa quando o preço bater um deles — ou quando o prazo de ${PARAMS.horizon} dias acabar.</div>`}
+    ${sold.length ? `<h2 class="section">Vendas registradas</h2><div class="list">${sold.map(p => {
+      const c = coinBySym[p.sym] || { sym: p.sym, color: colorFor(p.sym) }; const r = p.soldValue - p.amount;
+      return `<div class="row">${coinIcon(c)}<div class="meta"><div class="name">${p.sym}</div><div class="sub">${fmtDate(p.at)} → ${fmtDate(p.soldAt)} · ${p.soldReason || 'manual'}</div></div>
+        <div class="right"><div class="price num ${cls(r)}">${moneyLocal(r, true)}</div><div class="chg num ${cls(r)}">${pct(r / p.amount)}</div><button class="del" data-delpos="${p.id}">apagar</button></div></div>`;
+    }).join('')}</div>` : ''}
+    <p class="note">Stop e alvo padrão = 2× a variação média diária (ATR) da moeda, abaixo e acima da entrada. Já descontamos ${(PARAMS.costPct * 100).toFixed(1).replace('.', ',')}% de taxas (compra + venda). Simulações não são dinheiro real.</p>`;
 }
 
 function renderSettings() {
@@ -326,8 +427,8 @@ function renderSettings() {
       <p class="note" style="margin-top:0">Com o app aberto, os alertas chegam na hora. Para receber <b>com o app fechado</b>, o robô de análise (GitHub Actions) verifica o mercado a cada 30 minutos e envia uma notificação push para este iPhone.</p>
       <div class="set-row"><div><b>Quais moedas notificar?</b><div class="note" style="margin:2px 0 0">${S.notifyMode === 'favorites' ? `Só as ${S.favs.length} favoritas` : `Todas as ${COINS.length} moedas`}</div></div></div>
       <div class="seg"><button data-notify="all" class="${S.notifyMode === 'all' ? 'on' : ''}">Todas</button><button data-notify="favorites" class="${S.notifyMode === 'favorites' ? 'on' : ''}">★ Só favoritas</button></div>
-      ${S.pushCfg && S.pushCfg !== JSON.stringify(radarCfg())
-        ? '<div class="err" style="background:rgba(255,209,102,.12);color:var(--gold)">⚠️ Você mudou favoritas, moedas ou o tipo de notificação. Gere e copie o código de novo e atualize o segredo <b>PUSH_SUBSCRIPTIONS</b> no GitHub para o robô saber.</div>' : ''}
+      ${pushCfgStale()
+        ? '<div class="err" style="background:rgba(255,209,102,.12);color:var(--gold)">⚠️ Você mudou favoritas, moedas, compras simuladas ou o tipo de notificação. Gere e copie o código de novo e atualize o segredo <b>PUSH_SUBSCRIPTIONS</b> no GitHub para o robô saber.</div>' : ''}
       <button class="btn primary" id="enablePush">${perm === 'granted' ? 'Gerar código do aparelho' : 'Ativar notificações'}</button>
       <div id="pushOut"></div>
       <button class="btn ghost" id="testNotif">Enviar notificação de teste</button>
@@ -597,6 +698,7 @@ function flush() {
     const sp = S.spark[sym]; if (sp) sp[sp.length - 1] = t.price;
   }
   pending.clear();
+  checkPositions();
   if (S.view === 'sim' && S.positions.length) renderSim();
 }
 
@@ -634,8 +736,10 @@ async function enablePush() {
 function renderSettingsKeepOut() { /* mantém a mensagem de erro visível */ }
 
 // Configuração que vai junto do código do aparelho, para o robô no GitHub saber o que monitorar
+const pushCfgStale = () => !!S.pushCfg && S.pushCfg !== JSON.stringify(radarCfg());
 function radarCfg() {
-  return { notify: S.notifyMode, favs: [...S.favs].sort(), extra: customCoins().map(c => c.sym).sort() };
+  return { notify: S.notifyMode, favs: [...S.favs].sort(), extra: customCoins().map(c => c.sym).sort(),
+    pos: S.positions.filter(p => p.status === 'open').map(compactPos) };
 }
 
 // ---------------------------------------------------------------------------
@@ -712,8 +816,20 @@ function switchView(v) {
 
 document.addEventListener('click', e => {
   const tab = e.target.closest('.tab'); if (tab) return switchView(tab.dataset.view);
-  const del = e.target.closest('[data-del]');
-  if (del) { S.positions.splice(+del.dataset.del, 1); store.set('positions', S.positions); renderSim(); return; }
+  const dp = e.target.closest('[data-delpos]');
+  if (dp) { S.positions = S.positions.filter(p => p.id !== dp.dataset.delpos); savePositions(); renderSim(); return; }
+  const sl = e.target.closest('[data-sell]');
+  if (sl) {
+    const p = S.positions.find(x => x.id === sl.dataset.sell); if (!p) return;
+    const usd = sl.dataset.at === 'hit' ? p.hitPrice : price(p.sym); if (!usd) return;
+    Object.assign(p, { status: 'sold', soldAt: Date.now(), soldPrice: usd, soldValue: posValue(p, usd),
+      soldReason: sl.dataset.at === 'hit' ? (p.hitPrice >= p.entry ? 'no alvo' : 'no stop') : 'manual' });
+    savePositions(); renderSim();
+    toast(`Venda registrada: <b class="${cls(p.soldValue - p.amount)}">${moneyLocal(p.soldValue - p.amount, true)}</b>`);
+    return;
+  }
+  const ep = e.target.closest('[data-editpos]'); if (ep) { S.editPos = ep.dataset.editpos; renderSim(); return; }
+  if (e.target.closest('[data-editdone]')) { S.editPos = null; document.activeElement?.blur(); renderSim(); return; }
   const fv = e.target.closest('[data-fav]'); if (fv) { e.preventDefault(); return toggleFav(fv.dataset.fav); }
   const go = e.target.closest('[data-goto]'); if (go) return switchView(go.dataset.goto);
   const sf = e.target.closest('[data-sigf]'); if (sf) { S.sigFilter = sf.dataset.sigf; return renderSignals(); }
@@ -730,9 +846,12 @@ document.addEventListener('click', e => {
     const sym = S.detail, p = price(sym), amount = parseAmount();
     if (!p || !amount) return toast('Informe um valor válido.');
     const rate = S.cur === 'BRL' ? S.rate : 1;
-    S.positions.unshift({ sym, amount, cur: S.cur === 'BRL' && S.rate ? 'BRL' : 'USD', rate: rate || 1, entry: p, qty: (amount * (1 - PARAMS.costPct / 2)) / (p * (rate || 1)), at: Date.now() });
-    store.set('positions', S.positions); renderSim();
-    toast(`✅ Compra simulada de <b>${moneyLocal(amount)}</b> em ${sym}. Acompanhe na aba Simulador.`, () => { closeDetail(); switchView('sim'); });
+    const atr = S.analysis[sym]?.atrPct ?? 0.05, now = Date.now();
+    S.positions.unshift({ id: now.toString(36) + Math.random().toString(36).slice(2, 5), sym, amount, cur: S.cur === 'BRL' && S.rate ? 'BRL' : 'USD', rate: rate || 1,
+      entry: p, qty: (amount * (1 - PARAMS.costPct / 2)) / (p * (rate || 1)), at: now,
+      stop: p * (1 - 2 * atr), target: p * (1 + 2 * atr), exp: now + H_MS(), status: 'open', alerts: {} });
+    savePositions(); renderSim();
+    toast(`✅ Compra simulada de <b>${moneyLocal(amount)}</b> em ${sym}.<br><span class="muted">Stop ${money(p * (1 - 2 * atr))} · alvo ${money(p * (1 + 2 * atr))}. Você será avisado quando bater um deles.</span>`, () => { closeDetail(); switchView('sim'); });
     return;
   }
   const cb = e.target.closest('[data-cur]');
@@ -740,6 +859,14 @@ document.addEventListener('click', e => {
   if (e.target.closest('#enablePush')) return enablePush();
   if (e.target.closest('#testNotif')) return testNotif();
   if (e.target.closest('#refreshBtn')) return loadAll();
+});
+
+document.addEventListener('change', e => {
+  const k = e.target.dataset?.edit; if (!k) return;
+  const p = S.positions.find(x => x.id === e.target.dataset.id); if (!p) return;
+  const v = parseFloat(e.target.value.replace(',', '.')); if (!(v > 0 && v < 95)) return toast('Valor inválido.');
+  if (k === 'stop') p.stop = p.entry * (1 - v / 100); else p.target = p.entry * (1 + v / 100);
+  p.alerts = {}; savePositions();
 });
 
 document.addEventListener('input', e => {
@@ -773,6 +900,8 @@ function startLive() {
 }
 startLive();
 loadAll().then(() => {
+  migratePositions(); reconcilePositions();
+  if (new URLSearchParams(location.search).get('tab') === 'sim') switchView('sim');
   const q = new URLSearchParams(location.search).get('coin');
   if (q && coinBySym[q]) openDetail(q);
 });

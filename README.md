@@ -8,6 +8,7 @@ App para iPhone (PWA — instalado pelo Safari, sem App Store) que **avisa quand
 - Distância do gatilho (0–100) por moeda + explicação curta do porquê
 - **Simulação**: digite quanto quer investir e veja cenários pessimista/provável/otimista e a chance de lucro, baseados em casos reais
 - **Carteira simulada**: "compre" sem dinheiro e acompanhe o lucro/prejuízo ao vivo
+- **Avisos de venda**: cada compra simulada tem stop (limita a perda) e alvo (realiza o lucro), ajustáveis; o app e o robô avisam quando o preço bater um deles ou quando o prazo de 7 dias acabar
 - Notificações push no iPhone, mesmo com o app fechado
 - Visual escuro inspirado em carteiras como a Phantom, com ícone de cada moeda
 

@@ -1,0 +1,38 @@
+name: Robô de alertas de compra
+on:
+  schedule:
+    - cron: '*/30 * * * *'   # a cada 30 min (o GitHub pode atrasar alguns minutos)
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency: { group: signals, cancel-in-progress: false }
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm }
+      - run: npm ci --omit=dev
+      - name: Restaurar alertas já enviados
+        uses: actions/cache/restore@v4
+        with:
+          path: .state
+          key: signals-state-${{ github.run_id }}
+          restore-keys: signals-state-
+      - name: Analisar mercado e notificar
+        env:
+          PUSH_SUBSCRIPTIONS: ${{ secrets.PUSH_SUBSCRIPTIONS }}
+          VAPID_PRIVATE_KEY: ${{ secrets.VAPID_PRIVATE_KEY }}
+          VAPID_SUBJECT: ${{ secrets.VAPID_SUBJECT }}
+        run: |
+          OWNER="${GITHUB_REPOSITORY%%/*}"; NAME="${GITHUB_REPOSITORY#*/}"
+          export SITE_URL="https://${OWNER,,}.github.io/${NAME}/"
+          node scripts/check-signals.mjs
+      - name: Salvar estado
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .state
+          key: signals-state-${{ github.run_id }}

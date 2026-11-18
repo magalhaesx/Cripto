@@ -1,0 +1,15 @@
+{
+  "name": "radar-cripto",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Radar Cripto — alertas de compra de criptomoedas baseados em estatística (PWA para iPhone).",
+  "scripts": {
+    "start": "npx --yes serve -l 8080 .",
+    "signals": "node scripts/check-signals.mjs",
+    "test": "node --test tests/*.test.mjs"
+  },
+  "dependencies": {
+    "web-push": "^3.6.7"
+  }
+}

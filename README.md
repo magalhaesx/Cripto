@@ -1,0 +1,53 @@
+# 📡 Radar Cripto
+
+App para iPhone (PWA — instalado pelo Safari, sem App Store) que **avisa quando uma criptomoeda está boa para compra**, com base em estatística e teste no histórico, não em palpite.
+
+- Gráficos em tempo real, coloridos e interativos (arraste o dedo para ver preço e data)
+- Preço ao vivo, máxima e mínima histórica, máx./mín. 24h, volume, valor de mercado
+- Pontuação 0–100 por moeda + explicação curta do porquê
+- **Prova estatística**: a regra é testada em ~1.000 dias de cada moeda
+- **Simulação**: digite quanto quer investir e veja cenários pessimista/provável/otimista e a chance de lucro, baseados em casos reais
+- **Carteira simulada**: "compre" sem dinheiro e acompanhe o lucro/prejuízo ao vivo
+- Notificações push no iPhone, mesmo com o app fechado
+- Visual escuro inspirado em carteiras como a Phantom, com ícone de cada moeda
+
+Moedas: BTC, ETH, SOL, BNB, XRP, ADA, DOGE, AVAX, LINK, DOT, LTC, TRX, SUI, NEAR, TON, POL (edite `js/coins.js` para mudar).
+
+## Como colocar no ar (uma vez só)
+
+1. **Junte este código na branch `main`** (o site e o robô de alertas rodam a partir dela).
+2. **Ative o GitHub Pages**: no repositório, vá em *Settings › Pages › Source* e escolha **GitHub Actions**.
+   O app ficará em `https://<seu-usuario>.github.io/<repositório>/`.
+   (Em repositório privado, o Pages exige plano pago do GitHub; em público é grátis.)
+3. **Crie o segredo da chave de notificação**: *Settings › Secrets and variables › Actions › New repository secret*
+   - Nome: `VAPID_PRIVATE_KEY` — valor: a chave privada que acompanha este projeto (a pública já está em `js/config.js`).
+   - Para gerar um par novo: `npx web-push generate-vapid-keys` e troque também a pública em `js/config.js`.
+
+## Como instalar no iPhone
+
+1. Abra o endereço do app no **Safari**.
+2. Toque em **Compartilhar** › **Adicionar à Tela de Início**.
+3. Abra o app pelo ícone, vá em **Ajustes › Ativar notificações** e permita.
+4. Toque em **Copiar código** e salve no GitHub como segredo **`PUSH_SUBSCRIPTIONS`** (mesmo lugar do passo 3 acima).
+5. Pronto: o robô (`.github/workflows/signals.yml`) analisa o mercado **a cada 30 minutos** e manda push quando aparecer uma oportunidade (no máximo 1 alerta por moeda a cada 24h). Você pode rodá-lo na mão em *Actions › Robô de alertas de compra › Run workflow* e ver o relatório de todas as moedas no log.
+
+> Notificações push no iPhone exigem iOS 16.4+ e o app instalado na Tela de Início.
+
+## Como o app decide
+
+Resumo em [METODOLOGIA.md](METODOLOGIA.md). Código em `js/analysis.js` (o mesmo arquivo é usado pelo app e pelo robô).
+
+## Desenvolvimento
+
+```bash
+npm install
+npm test          # testes do motor estatístico
+npm start         # servidor local em http://localhost:8080
+npm run signals   # roda o robô localmente (sem segredos ele só imprime o relatório)
+```
+
+Dados: Binance (`data-api.binance.vision`, público, tempo real via WebSocket) e CoinGecko (ícones, máxima/mínima histórica, valor de mercado).
+
+## ⚠️ Aviso
+
+Estatística reduz o “chute”, mas **não elimina o risco**. Resultados passados não garantem resultados futuros. Use como apoio à decisão, invista só o que pode perder e respeite o stop sugerido. Não é recomendação de investimento.

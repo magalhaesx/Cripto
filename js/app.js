@@ -3,7 +3,7 @@ import { analyze, simulate, applyBreadth, PARAMS } from './analysis.js';
 import { STUDY } from './study.js';
 import { firstHit, compactPos, exitMessage } from './positions.js';
 import { fetchDaily, fetchKlines, fetchTickers24h, fetchUsdBrl, fetchMarkets, connectLive, fetchAllUsdtSymbols, RANGES } from './api.js';
-import { PriceChart, drawSpark, drawHistogram, drawScoreRing, scoreColor } from './chart.js';
+import { PriceChart, drawSpark, drawHistogram, drawScoreRing, drawDonut, scoreColor } from './chart.js';
 import { VAPID_PUBLIC_KEY } from './config.js';
 
 // ---------------------------------------------------------------------------
@@ -29,6 +29,8 @@ const S = {
   tickers: {}, daily: {}, analysis: {}, markets: {}, spark: {},
   amount: store.get('amount', 1000),
   positions: store.get('positions', []),
+  wallet: store.get('wallet', null),       // { initialUsd, cashUsd, createdAt }
+  hourly: {}, walletRange: '7D',
   notified: store.get('notified', {}),
   favs: store.get('favs', []),
   notifyMode: store.get('notifyMode', 'all'),   // 'all' | 'favorites'
@@ -101,7 +103,7 @@ async function loadAll() {
   const results = await Promise.allSettled(COINS.map(async c => {
     const [d, h] = await Promise.all([fetchDaily(c.sym), fetchKlines(c.sym, '1h', 168).catch(() => null)]);
     S.daily[c.sym] = d;
-    if (h) S.spark[c.sym] = h.map(k => k.c);
+    if (h) { S.spark[c.sym] = h.map(k => k.c); S.hourly[c.sym] = h; }
     S.analysis[c.sym] = analyze(d, PARAMS, STUDY);
   }));
   const failed = results.filter(r => r.status === 'rejected').length;
@@ -296,6 +298,8 @@ function migratePositions() {
     }
     if (!p.exp) { p.exp = p.at + H_MS(); changed = true; }
     if (!p.status) { p.status = 'open'; changed = true; }
+    if (p.costUsd == null) { p.costUsd = p.amount / (p.cur === 'BRL' ? p.rate : 1); changed = true; }
+    if (p.status === 'sold' && p.soldValueUsd == null) { p.soldValueUsd = (p.soldValue ?? p.amount) / (p.cur === 'BRL' ? p.rate : 1); changed = true; }
     p.alerts ||= {};
   }
   if (changed) savePositions();
@@ -303,6 +307,74 @@ function migratePositions() {
 const savePositions = () => store.set('positions', S.positions);
 const localRate = p => (p.cur === 'BRL' ? (S.rate || p.rate) : 1);
 const posValue = (p, usdPrice, rate = localRate(p)) => p.qty * usdPrice * rate * (1 - PARAMS.costPct / 2);
+const valueUsd = (p, usdPrice) => p.qty * usdPrice * (1 - PARAMS.costPct / 2);   // valor de venda (já com taxa)
+
+// ---------- carteira fictícia ----------
+const saveWallet = () => store.set('wallet', S.wallet);
+function initWallet() {
+  if (S.wallet) return;
+  const initialUsd = S.cur === 'BRL' && S.rate ? 10000 / S.rate : 2000;
+  let cash = initialUsd;
+  for (const p of S.positions) { cash -= p.costUsd; if (p.status === 'sold') cash += p.soldValueUsd; }
+  S.wallet = { initialUsd: initialUsd + Math.max(0, -cash), cashUsd: Math.max(0, cash), createdAt: Math.min(Date.now(), ...S.positions.map(p => p.at)) };
+  saveWallet();
+}
+function resetWallet(localAmount) {
+  const usd = S.cur === 'BRL' && S.rate ? localAmount / S.rate : localAmount;
+  S.positions = []; savePositions();
+  S.wallet = { initialUsd: usd, cashUsd: usd, createdAt: Date.now() }; saveWallet();
+  renderSim();
+}
+
+// preço de uma moeda num instante t (velas de 1h se houver, senão diárias)
+function priceAt(sym, t) {
+  const pick = arr => { if (!arr?.length || t < arr[0].t) return null; let lo = 0, hi = arr.length - 1;
+    while (lo < hi) { const m = (lo + hi + 1) >> 1; if (arr[m].t <= t) lo = m; else hi = m - 1; } return arr[lo].c; };
+  return pick(S.hourly[sym]) ?? pick(S.daily[sym]);
+}
+
+function walletSeries() {
+  const W = S.wallet, now = Date.now();
+  const start = Math.max(W.createdAt, S.walletRange === '7D' ? now - 7 * 864e5 : 0);
+  const hourly = now - start <= 8 * 864e5;
+  const ref = (hourly ? S.hourly.BTC : S.daily.BTC) || [];
+  const times = [start, ...ref.map(k => k.t).filter(t => t > start), now];
+  const lots = S.positions;
+  const pts = times.map(t => {
+    let cash = W.initialUsd, hold = 0;
+    for (const p of lots) {
+      if (p.at > t) continue;
+      cash -= p.costUsd;
+      if (p.status === 'sold' && p.soldAt <= t) { cash += p.soldValueUsd; continue; }
+      const px = t === now ? (price(p.sym) ?? p.entry) : (priceAt(p.sym, t) ?? p.entry);
+      hold += valueUsd(p, px);
+    }
+    const v = cash + hold;
+    return { t, o: v, h: v, l: v, c: v, v: 0 };
+  });
+  // a carteira começa com o saldo inicial (sem compras antes de criada)
+  return pts;
+}
+
+function walletTotals() {
+  const W = S.wallet;
+  const open = S.positions.filter(p => p.status !== 'sold');
+  const sold = S.positions.filter(p => p.status === 'sold');
+  const bySym = {};
+  let holdUsd = 0, costOpen = 0, d24 = 0;
+  for (const p of open) {
+    const px = price(p.sym) ?? p.entry, v = valueUsd(p, px);
+    const h = (bySym[p.sym] ||= { sym: p.sym, qty: 0, cost: 0, value: 0, lots: 0 });
+    h.qty += p.qty; h.cost += p.costUsd; h.value += v; h.lots++;
+    holdUsd += v; costOpen += p.costUsd;
+    const t = S.tickers[p.sym]; if (t?.open) d24 += p.qty * (px - Math.max(t.open, p.at > Date.now() - 864e5 ? p.entry : 0)) * (1 - PARAMS.costPct / 2);
+  }
+  const realized = sold.reduce((a, p) => a + p.soldValueUsd - p.costUsd, 0);
+  const wins = sold.filter(p => p.soldValueUsd > p.costUsd).length;
+  const total = W.cashUsd + holdUsd;
+  return { total, cash: W.cashUsd, holdUsd, costOpen, unrealized: holdUsd - costOpen, realized, wins, sold: sold.length,
+    pl: total - W.initialUsd, d24, holdings: Object.values(bySym).sort((a, b) => b.value - a.value) };
+}
 
 async function alertPosition(p, type, priceUsd) {
   if (p.alerts[type]) return;
@@ -356,32 +428,34 @@ const STATUS = {
   open: ['ABERTA', 'neutral'], target: ['🎯 ALVO ATINGIDO', 'buy'], stop: ['🛑 STOP ATINGIDO', 'avoid'], sold: ['VENDIDA', 'neutral'],
 };
 
-function renderSim() {
+let walletChart = null, lastSimRender = 0;
+function renderSim(fromTick) {
   const el = $('#view-sim');
-  if (document.activeElement?.closest?.('#view-sim .pos-edit')) return; // não atrapalhar quem está digitando
+  if (document.activeElement?.closest?.('#view-sim .pos-edit, #view-sim .wallet-reset')) return; // não atrapalhar quem está digitando
+  if (fromTick && (walletChart?.hover != null || Date.now() - lastSimRender < 2000)) return;
+  lastSimRender = Date.now();
+  if (!S.wallet) { el.innerHTML = '<div class="skeleton" style="height:220px;margin-top:10px"></div>'; return; }
+  const T = walletTotals(), W = S.wallet;
   const active = S.positions.filter(p => p.status !== 'sold');
-  const sold = S.positions.filter(p => p.status === 'sold');
-  let inv = 0, val = 0;
   const cards = active.map(p => {
     const c = coinBySym[p.sym] || { sym: p.sym, name: p.sym, color: colorFor(p.sym) };
     const cur = price(p.sym);
-    const v = cur ? posValue(p, cur) : null;
-    inv += p.amount; val += v ?? p.amount;
-    const pl = v != null ? v - p.amount : 0;
+    const v = cur ? valueUsd(p, cur) : null;
+    const pl = v != null ? v - p.costUsd : 0;
     const [label, kls] = STATUS[p.status];
     const left = p.exp - Date.now();
     const timeTxt = left > 0 ? `prazo: ${left > 864e5 ? `${Math.ceil(left / 864e5)} dias` : `${Math.ceil(left / 36e5)} h`}` : '⏰ prazo de 7 dias encerrado';
     const hit = p.status === 'target' || p.status === 'stop';
-    const hitVal = hit ? posValue(p, p.hitPrice) : null;
+    const hitVal = hit ? valueUsd(p, p.hitPrice) : null;
     return `<div class="pos-card${hit ? ` hit-${p.status}` : ''}">
       <div class="pos-top">${coinIcon(c)}
         <div class="meta" data-open="${p.sym}"><div class="name">${c.sym} <span class="chip ${kls}">${label}</span></div>
-          <div class="sub">${moneyLocal(p.amount)} em ${fmtDate(p.at)} · entrada ${money(p.entry)}</div></div>
-        <div class="right"><div class="price num">${moneyLocal(v)}</div><div class="chg num ${cls(pl)}">${moneyLocal(pl, true)} (${pct(pl / p.amount)})</div></div>
+          <div class="sub">${money(p.costUsd)} em ${fmtDate(p.at)} · entrada ${money(p.entry)}</div></div>
+        <div class="right"><div class="price num">${money(v)}</div><div class="chg num ${cls(pl)}">${money(pl, { sign: true })} (${pct(pl / p.costUsd)})</div></div>
       </div>
       ${rangeBar(p, cur)}
       <div class="pos-foot"><span class="muted">${timeTxt}</span><span class="muted">${p.alerts.expire && !hit ? 'reavalie a posição' : ''}</span></div>
-      ${hit ? `<div class="pos-hit">${p.status === 'target' ? '🎯 Bateu o alvo' : '🛑 Bateu o stop'} em ${money(p.hitPrice)}. Vendendo nesse preço: <b class="${cls(hitVal - p.amount)}">${moneyLocal(hitVal - p.amount, true)}</b></div>` : ''}
+      ${hit ? `<div class="pos-hit">${p.status === 'target' ? '🎯 Bateu o alvo' : '🛑 Bateu o stop'} em ${money(p.hitPrice)}. Vendendo nesse preço: <b class="${cls(hitVal - p.costUsd)}">${money(hitVal - p.costUsd, { sign: true })}</b></div>` : ''}
       ${S.editPos === p.id ? `<div class="pos-edit">
           <label>Stop (% abaixo da entrada)<input data-edit="stop" data-id="${p.id}" inputmode="decimal" value="${(Math.abs(p.stop / p.entry - 1) * 100).toFixed(1).replace('.', ',')}"></label>
           <label>Alvo (% acima da entrada)<input data-edit="target" data-id="${p.id}" inputmode="decimal" value="${((p.target / p.entry - 1) * 100).toFixed(1).replace('.', ',')}"></label>
@@ -389,26 +463,95 @@ function renderSim() {
       <div class="pos-actions">
         ${hit ? `<button class="chip buy" data-sell="${p.id}" data-at="hit">Registrar venda a ${money(p.hitPrice)}</button>` : `<button class="chip buy" data-sell="${p.id}">Vender agora</button>`}
         ${hit ? '' : `<button class="chip neutral" data-editpos="${p.id}">Ajustar stop/alvo</button>`}
-        <button class="chip neutral" data-delpos="${p.id}">remover</button>
+        <button class="chip neutral" data-delpos="${p.id}">cancelar</button>
       </div>
     </div>`;
   });
-  const realized = sold.reduce((s, p) => s + (p.soldValue - p.amount), 0);
-  const pl = val - inv;
+
+  // donut: moedas + saldo
+  const segs = [...T.holdings.map(h => ({ label: h.sym, value: h.value, color: (coinBySym[h.sym] || {}).color || colorFor(h.sym) })),
+    { label: 'Saldo', value: T.cash, color: '#5B5B6B' }].filter(x => x.value > 0);
+  const moves = [];
+  for (const p of S.positions) {
+    moves.push({ t: p.at, kind: 'buy', p });
+    if (p.status === 'sold') moves.push({ t: p.soldAt, kind: 'sell', p });
+  }
+  moves.sort((a, b) => b.t - a.t);
+
   el.innerHTML = `
-    <div class="balance"><div class="muted">Carteira simulada (valor de venda agora)</div>
-      <div class="big num">${moneyLocal(val)}</div>
-      <div class="pl num ${cls(pl)}">${moneyLocal(pl, true)} · ${inv ? pct(pl / inv) : '0,00%'}</div>
-      ${sold.length ? `<div class="muted" style="margin-top:4px;font-size:13px">Vendas registradas: <b class="${cls(realized)}">${moneyLocal(realized, true)}</b></div>` : ''}</div>
+    <div class="hero wallet-hero">
+      <div class="hero-label">Patrimônio da carteira fictícia</div>
+      <div class="hero-big num">${money(T.total)}</div>
+      <div class="hero-row" style="margin-top:6px">
+        <span class="pill ${T.pl >= 0 ? 'pill-up' : 'pill-down'}">${T.pl >= 0 ? '▲' : '▼'} ${money(T.pl, { sign: true })} (${pct(T.pl / W.initialUsd)}) desde o início</span>
+        ${T.holdings.length ? `<span class="pill">24h: ${money(T.d24, { sign: true })}</span>` : ''}
+      </div>
+      <div class="hero-sub" style="margin-top:10px">💵 Saldo disponível para comprar: <b>${money(T.cash)}</b></div>
+    </div>
+
     ${pushCfgStale() ? `<div class="err" style="background:rgba(255,209,102,.12);color:var(--gold)">⚠️ Para receber avisos de stop/alvo com o app fechado, atualize o código do aparelho no GitHub. <button class="chip watch" data-goto="settings" style="margin-top:6px">Ir para Ajustes</button></div>` : ''}
-    ${active.length ? cards.join('')
-      : `<div class="empty" style="margin-top:12px"><b>Nenhuma compra simulada aberta.</b> Abra uma moeda e toque em <b>“Simular compra agora”</b>. O app define um <b>stop</b> (para limitar a perda) e um <b>alvo</b> (para realizar o lucro) e te avisa quando o preço bater um deles — ou quando o prazo de ${PARAMS.horizon} dias acabar.</div>`}
-    ${sold.length ? `<h2 class="section">Vendas registradas</h2><div class="list">${sold.map(p => {
-      const c = coinBySym[p.sym] || { sym: p.sym, color: colorFor(p.sym) }; const r = p.soldValue - p.amount;
-      return `<div class="row">${coinIcon(c)}<div class="meta"><div class="name">${p.sym}</div><div class="sub">${fmtDate(p.at)} → ${fmtDate(p.soldAt)} · ${p.soldReason || 'manual'}</div></div>
-        <div class="right"><div class="price num ${cls(r)}">${moneyLocal(r, true)}</div><div class="chg num ${cls(r)}">${pct(r / p.amount)}</div><button class="del" data-delpos="${p.id}">apagar</button></div></div>`;
+
+    <div class="card" style="padding:14px 0 10px">
+      <h3 style="padding:0 16px">Evolução <div class="seg mini">${['7D', 'TUDO'].map(r => `<button data-wrange="${r}" class="${S.walletRange === r ? 'on' : ''}">${r === 'TUDO' ? 'Tudo' : r}</button>`).join('')}</div></h3>
+      <div class="wallet-chart-val num" id="wHover"></div>
+      <canvas id="walletChart" class="wallet-chart"></canvas>
+      <div class="legend" style="padding:0 16px"><span><i style="background:var(--up)"></i>Compras</span><span>Valor total = saldo + moedas (já com taxa de venda)</span></div>
+    </div>
+
+    <div class="card">
+      <h3>Distribuição</h3>
+      <div class="alloc">
+        <div class="donut"><canvas id="donut"></canvas><div class="donut-c"><b class="num">${T.holdings.length}</b><span>moeda${T.holdings.length === 1 ? '' : 's'}</span></div></div>
+        <div class="alloc-legend">${segs.map(g => `<div><i style="background:${g.color}"></i><span>${g.label}</span><b class="num">${pct0(g.value / T.total)}</b></div>`).join('')}</div>
+      </div>
+    </div>
+
+    <div class="grid2" style="margin-top:14px">
+      <div class="stat"><div class="k">Em moedas</div><div class="v num">${money(T.holdUsd)}</div><div class="s">investido ${money(T.costOpen)}</div></div>
+      <div class="stat ${T.unrealized >= 0 ? 'ath' : 'atl'}"><div class="k">Lucro não realizado</div><div class="v num ${cls(T.unrealized)}">${money(T.unrealized, { sign: true })}</div><div class="s">${T.costOpen ? pct(T.unrealized / T.costOpen) : '—'}</div></div>
+      <div class="stat ${T.realized >= 0 ? 'ath' : 'atl'}"><div class="k">Lucro realizado</div><div class="v num ${cls(T.realized)}">${money(T.realized, { sign: true })}</div><div class="s">${T.sold} venda${T.sold === 1 ? '' : 's'}</div></div>
+      <div class="stat"><div class="k">Vendas com lucro</div><div class="v num">${T.sold ? pct0(T.wins / T.sold) : '—'}</div><div class="s">${T.wins} de ${T.sold}</div></div>
+    </div>
+
+    <h2 class="section">Seus ativos <small class="muted">${T.holdings.length ? 'toque para ver a moeda' : ''}</small></h2>
+    ${T.holdings.length ? `<div class="list">${T.holdings.map(h => {
+      const c = coinBySym[h.sym] || { sym: h.sym, name: h.sym, color: colorFor(h.sym) };
+      const pl = h.value - h.cost;
+      return `<button class="row" data-open="${h.sym}">${coinIcon(c)}
+        <div class="meta"><div class="name">${esc(c.name)}</div><div class="sub num">${qty(h.qty, h.sym)}</div>
+          <div class="alloc-bar"><i style="width:${(h.value / T.total) * 100}%;background:${c.color}"></i></div></div>
+        <div class="right"><div class="price num">${money(h.value)}</div><div class="chg num ${cls(pl)}">${money(pl, { sign: true })} (${pct(pl / h.cost)})</div>
+          <div class="sub" style="font-size:11px;color:var(--muted)">preço médio ${money((h.cost * (1 - PARAMS.costPct / 2)) / h.qty)}</div></div>
+      </button>`;
+    }).join('')}</div>`
+      : `<div class="empty"><b>Sua carteira ainda não tem moedas.</b> Abra qualquer moeda e toque em <b>“Simular compra agora”</b>. O valor sai do seu saldo fictício de ${money(T.cash)}.</div>`}
+
+    ${active.length ? `<h2 class="section">Operações abertas <small class="muted">stop · alvo · prazo</small></h2>${cards.join('')}` : ''}
+
+    ${moves.length ? `<h2 class="section">Movimentações</h2><div class="list">${moves.slice(0, 30).map(m => {
+      const c = coinBySym[m.p.sym] || { sym: m.p.sym, color: colorFor(m.p.sym) };
+      if (m.kind === 'buy') return `<div class="row">${coinIcon(c)}<div class="meta"><div class="name">Compra · ${m.p.sym}</div><div class="sub">${fmtDateTime(m.t, '7D')} · ${qty(m.p.qty, '')} a ${money(m.p.entry)}</div></div>
+        <div class="right"><div class="price num down">−${money(m.p.costUsd)}</div></div></div>`;
+      const r = m.p.soldValueUsd - m.p.costUsd;
+      return `<div class="row">${coinIcon(c)}<div class="meta"><div class="name">Venda · ${m.p.sym}</div><div class="sub">${fmtDateTime(m.t, '7D')} · ${m.p.soldReason || 'manual'}</div></div>
+        <div class="right"><div class="price num up">+${money(m.p.soldValueUsd)}</div><div class="chg num ${cls(r)}">${money(r, { sign: true })}</div></div></div>`;
     }).join('')}</div>` : ''}
-    <p class="note">Stop e alvo padrão = 2× a variação média diária (ATR) da moeda, abaixo e acima da entrada. Já descontamos ${(PARAMS.costPct * 100).toFixed(1).replace('.', ',')}% de taxas (compra + venda). Simulações não são dinheiro real.</p>`;
+
+    <div class="card wallet-reset"><h3>Carteira fictícia</h3>
+      <p class="note" style="margin-top:0">Começou em ${fmtDate(W.createdAt)} com ${money(W.initialUsd)}. Para recomeçar, escolha um novo saldo inicial (apaga compras e vendas).</p>
+      <div class="pos-edit" style="margin-top:6px"><label>Novo saldo inicial (${curSym()})<input id="resetAmt" inputmode="decimal" value="${Math.round(conv(W.initialUsd)).toLocaleString('pt-BR')}"></label>
+        <button class="chip avoid" id="resetWallet" style="padding:9px 14px">Reiniciar</button></div>
+    </div>
+    <p class="note">Simulação sem dinheiro real. Stop e alvo padrão = 2× a variação média diária (ATR). Taxas de ${(PARAMS.costPct * 100).toFixed(1).replace('.', ',')}% (compra + venda) já descontadas.</p>`;
+
+  drawDonut($('#donut'), segs);
+  walletChart = new PriceChart($('#walletChart'), {
+    fmt: v => money(v),
+    onHover: pt => { const h = $('#wHover'); if (!h) return; h.innerHTML = pt ? `${money(pt.c)} <span class="muted">· ${fmtDateTime(pt.t, '7D')}</span> <span class="${cls(pt.c - W.initialUsd)}">${pct(pt.c / W.initialUsd - 1)}</span>` : ''; },
+  });
+  const firstDraw = !renderSim._drawn || renderSim._range !== S.walletRange;
+  renderSim._drawn = true; renderSim._range = S.walletRange;
+  walletChart.setData(walletSeries(), { markers: S.positions.map(p => p.at), animate: firstDraw });
 }
 
 function renderSettings() {
@@ -527,6 +670,21 @@ function renderDetail() {
   if (a?.ok) { drawScoreRing($('#ring'), a.score); updateSim(); }
 }
 
+function holdingCard(c) {
+  const lots = S.positions.filter(p => p.sym === c.sym && p.status !== 'sold');
+  if (!lots.length) return '';
+  const px = price(c.sym) ?? lots[0].entry;
+  const q = lots.reduce((a, p) => a + p.qty, 0), cost = lots.reduce((a, p) => a + p.costUsd, 0), v = lots.reduce((a, p) => a + valueUsd(p, px), 0);
+  return `<div class="card holding" style="border:1px solid ${c.color}55;background:linear-gradient(135deg, ${c.color}22, var(--card) 60%)">
+    <h3>👛 Na sua carteira <span class="chip neutral">${lots.length} compra${lots.length > 1 ? 's' : ''}</span></h3>
+    <div class="grid2">
+      <div class="stat"><div class="k">Quantidade</div><div class="v num">${qty(q, c.sym)}</div><div class="s">preço médio ${money((cost * (1 - PARAMS.costPct / 2)) / q)}</div></div>
+      <div class="stat ${v >= cost ? 'ath' : 'atl'}"><div class="k">Vale agora</div><div class="v num">${money(v)}</div><div class="s ${cls(v - cost)}">${money(v - cost, { sign: true })} (${pct(v / cost - 1)})</div></div>
+    </div>
+    <button class="btn ghost" data-sellall="${c.sym}" style="margin-top:12px">Vender tudo de ${c.sym}</button>
+  </div>`;
+}
+
 function detailAnalysis(c, a) {
   const v = VERDICT[a.verdict];
   const bt = a.bt;
@@ -563,7 +721,8 @@ function detailAnalysis(c, a) {
       <p class="note">${esc(a.statsText)} Valores já descontam ${(PARAMS.costPct * 100).toFixed(1).replace('.', ',')}% de taxas.</p>
     </div>
 
-    <div class="card"><h3>💰 Simulação de compra</h3>
+    ${holdingCard(c)}
+    <div class="card"><h3>💰 Simulação de compra <span class="chip neutral">saldo ${S.wallet ? money(S.wallet.cashUsd) : '—'}</span></h3>
       <div class="amount"><span>${curSym()}</span><input id="amt" inputmode="decimal" value="${String(S.amount).replace('.', ',')}"></div>
       <div class="quick">${[100, 500, 1000, 5000].map(q => `<button data-amt="${q}">${q.toLocaleString('pt-BR')}</button>`).join('')}</div>
       <div id="simOut"></div>
@@ -699,7 +858,7 @@ function flush() {
   }
   pending.clear();
   checkPositions();
-  if (S.view === 'sim' && S.positions.length) renderSim();
+  if (S.view === 'sim' && S.positions.length) renderSim(true);
 }
 
 // ---------------------------------------------------------------------------
@@ -775,7 +934,7 @@ async function addCoin(sym) {
   const c = coinBySym[sym];
   try {
     const [d, h] = await Promise.all([fetchDaily(sym), fetchKlines(sym, '1h', 168).catch(() => null)]);
-    S.daily[sym] = d; if (h) S.spark[sym] = h.map(k => k.c);
+    S.daily[sym] = d; if (h) { S.spark[sym] = h.map(k => k.c); S.hourly[sym] = h; }
     S.analysis[sym] = analyze(d, PARAMS, STUDY);
     applyBreadth(S.analysis, PARAMS, STUDY);
     Object.assign(S.tickers, await fetchTickers24h([c]).catch(() => ({})));
@@ -811,21 +970,45 @@ function switchView(v) {
   $$('.view').forEach(s => s.classList.toggle('active', s.id === `view-${v}`));
   window.scrollTo({ top: 0 });
   if (v === 'settings') renderSettings();
+  if (v === 'sim') renderSim();
   if (v === 'home') requestAnimationFrame(drawSparks);
 }
 
 document.addEventListener('click', e => {
   const tab = e.target.closest('.tab'); if (tab) return switchView(tab.dataset.view);
   const dp = e.target.closest('[data-delpos]');
-  if (dp) { S.positions = S.positions.filter(p => p.id !== dp.dataset.delpos); savePositions(); renderSim(); return; }
+  if (dp) {
+    const p = S.positions.find(x => x.id === dp.dataset.delpos);
+    if (p && S.wallet) { S.wallet.cashUsd += p.status === 'sold' ? p.costUsd - p.soldValueUsd : p.costUsd; saveWallet(); } // desfaz a operação
+    S.positions = S.positions.filter(x => x.id !== dp.dataset.delpos); savePositions(); renderSim(); return;
+  }
+  const wr = e.target.closest('[data-wrange]'); if (wr) { S.walletRange = wr.dataset.wrange; renderSim(); return; }
+  if (e.target.closest('#resetWallet')) {
+    const v = parseFloat(($('#resetAmt').value || '').replace(/\./g, '').replace(',', '.'));
+    if (!(v > 0)) return toast('Informe um saldo válido.');
+    if (!confirm(`Reiniciar a carteira com ${curSym()} ${v.toLocaleString('pt-BR')}? Compras e vendas simuladas serão apagadas.`)) return;
+    document.activeElement?.blur(); resetWallet(v); toast('Carteira reiniciada.'); return;
+  }
+  const sa = e.target.closest('[data-sellall]');
+  if (sa) {
+    const sym = sa.dataset.sellall, usd = price(sym); if (!usd) return;
+    let got = 0;
+    for (const p of S.positions.filter(x => x.sym === sym && x.status !== 'sold')) {
+      Object.assign(p, { status: 'sold', soldAt: Date.now(), soldPrice: usd, soldValue: posValue(p, usd), soldValueUsd: valueUsd(p, usd), soldReason: 'vender tudo' });
+      got += p.soldValueUsd;
+    }
+    S.wallet.cashUsd += got; saveWallet(); savePositions(); renderSim(); renderDetail();
+    toast(`Vendeu todo o ${sym}: <b>+${money(got)}</b> voltou para o saldo.`); return;
+  }
   const sl = e.target.closest('[data-sell]');
   if (sl) {
     const p = S.positions.find(x => x.id === sl.dataset.sell); if (!p) return;
     const usd = sl.dataset.at === 'hit' ? p.hitPrice : price(p.sym); if (!usd) return;
-    Object.assign(p, { status: 'sold', soldAt: Date.now(), soldPrice: usd, soldValue: posValue(p, usd),
+    Object.assign(p, { status: 'sold', soldAt: Date.now(), soldPrice: usd, soldValue: posValue(p, usd), soldValueUsd: valueUsd(p, usd),
       soldReason: sl.dataset.at === 'hit' ? (p.hitPrice >= p.entry ? 'no alvo' : 'no stop') : 'manual' });
+    S.wallet.cashUsd += p.soldValueUsd; saveWallet();
     savePositions(); renderSim();
-    toast(`Venda registrada: <b class="${cls(p.soldValue - p.amount)}">${moneyLocal(p.soldValue - p.amount, true)}</b>`);
+    toast(`Venda registrada: <b class="${cls(p.soldValueUsd - p.costUsd)}">${money(p.soldValueUsd - p.costUsd, { sign: true })}</b> · saldo ${money(S.wallet.cashUsd)}`);
     return;
   }
   const ep = e.target.closest('[data-editpos]'); if (ep) { S.editPos = ep.dataset.editpos; renderSim(); return; }
@@ -846,9 +1029,13 @@ document.addEventListener('click', e => {
     const sym = S.detail, p = price(sym), amount = parseAmount();
     if (!p || !amount) return toast('Informe um valor válido.');
     const rate = S.cur === 'BRL' ? S.rate : 1;
+    initWallet();
+    const costUsd = amount / (rate || 1);
+    if (costUsd > S.wallet.cashUsd + 1e-9) return toast(`Saldo insuficiente na carteira fictícia: disponível ${money(S.wallet.cashUsd)}.`);
+    S.wallet.cashUsd -= costUsd; saveWallet();
     const atr = S.analysis[sym]?.atrPct ?? 0.05, now = Date.now();
     S.positions.unshift({ id: now.toString(36) + Math.random().toString(36).slice(2, 5), sym, amount, cur: S.cur === 'BRL' && S.rate ? 'BRL' : 'USD', rate: rate || 1,
-      entry: p, qty: (amount * (1 - PARAMS.costPct / 2)) / (p * (rate || 1)), at: now,
+      entry: p, qty: (amount * (1 - PARAMS.costPct / 2)) / (p * (rate || 1)), at: now, costUsd,
       stop: p * (1 - 2 * atr), target: p * (1 + 2 * atr), exp: now + H_MS(), status: 'open', alerts: {} });
     savePositions(); renderSim();
     toast(`✅ Compra simulada de <b>${moneyLocal(amount)}</b> em ${sym}.<br><span class="muted">Stop ${money(p * (1 - 2 * atr))} · alvo ${money(p * (1 + 2 * atr))}. Você será avisado quando bater um deles.</span>`, () => { closeDetail(); switchView('sim'); });
@@ -900,7 +1087,7 @@ function startLive() {
 }
 startLive();
 loadAll().then(() => {
-  migratePositions(); reconcilePositions();
+  migratePositions(); initWallet(); reconcilePositions(); renderSim();
   if (new URLSearchParams(location.search).get('tab') === 'sim') switchView('sim');
   const q = new URLSearchParams(location.search).get('coin');
   if (q && coinBySym[q]) openDetail(q);

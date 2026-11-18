@@ -263,3 +263,25 @@ export function scoreColor(s) {
   if (s >= 35) return '#FF9F5A';
   return DOWN;
 }
+
+// Rosca de distribuição da carteira
+export function drawDonut(canvas, segs) {
+  if (!canvas) return;
+  const { ctx, w, h } = setupCanvas(canvas);
+  ctx.clearRect(0, 0, w, h);
+  const cx = w / 2, cy = h / 2, r = Math.min(w, h) / 2 - 8, lw = 16;
+  if (r <= 0) return;   // tela ainda não visível
+  const total = segs.reduce((a, g) => a + g.value, 0);
+  ctx.lineWidth = lw; ctx.lineCap = 'butt';
+  if (!total) { ctx.strokeStyle = 'rgba(255,255,255,.08)'; ctx.beginPath(); ctx.arc(cx, cy, r, 0, 7); ctx.stroke(); return; }
+  let a0 = -Math.PI / 2;
+  const gap = segs.length > 1 ? 0.04 : 0;
+  for (const g of segs) {
+    const a1 = a0 + (g.value / total) * Math.PI * 2;
+    ctx.strokeStyle = g.color;
+    ctx.shadowColor = g.color; ctx.shadowBlur = 8;
+    ctx.beginPath(); ctx.arc(cx, cy, r, a0 + gap / 2, Math.max(a0 + gap / 2 + 0.001, a1 - gap / 2)); ctx.stroke();
+    a0 = a1;
+  }
+  ctx.shadowBlur = 0;
+}

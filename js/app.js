@@ -1,6 +1,6 @@
-import { COINS, coinBySym } from './coins.js';
+import { COINS as BASE_COINS, colorFor } from './coins.js';
 import { analyze, simulate, PARAMS } from './analysis.js';
-import { fetchDaily, fetchKlines, fetchTickers24h, fetchUsdBrl, fetchMarkets, connectLive, RANGES } from './api.js';
+import { fetchDaily, fetchKlines, fetchTickers24h, fetchUsdBrl, fetchMarkets, connectLive, fetchAllUsdtSymbols, RANGES } from './api.js';
 import { PriceChart, drawSpark, drawHistogram, drawScoreRing, scoreColor } from './chart.js';
 import { VAPID_PUBLIC_KEY } from './config.js';
 
@@ -12,6 +12,15 @@ const store = {
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
 };
 
+// Lista de moedas = padrão + adicionadas pelo usuário
+let COINS = [], coinBySym = {};
+function buildCoins() {
+  const custom = store.get('customCoins', []);
+  COINS = [...BASE_COINS, ...custom.filter(c => !BASE_COINS.some(b => b.sym === c.sym))];
+  coinBySym = Object.fromEntries(COINS.map(c => [c.sym, c]));
+}
+buildCoins();
+
 const S = {
   cur: store.get('cur', 'BRL'),
   rate: store.get('rate', null),     // USDT → BRL
@@ -19,6 +28,10 @@ const S = {
   amount: store.get('amount', 1000),
   positions: store.get('positions', []),
   notified: store.get('notified', {}),
+  favs: store.get('favs', []),
+  notifyMode: store.get('notifyMode', 'all'),   // 'all' | 'favorites'
+  sigFilter: 'all',
+  pushCfg: store.get('pushCfg', null),          // config incluída no último código copiado
   view: 'home', detail: null, range: '1A', chart: null, loading: true, error: null,
 };
 
@@ -78,7 +91,7 @@ const price = sym => S.tickers[sym]?.price ?? S.daily[sym]?.at(-1)?.c;
 async function loadAll() {
   $('#refreshBtn').classList.add('spin');
   S.error = null;
-  const [tick, rate, markets] = await Promise.allSettled([fetchTickers24h(), fetchUsdBrl(), fetchMarkets()]);
+  const [tick, rate, markets] = await Promise.allSettled([fetchTickers24h(COINS), fetchUsdBrl(), fetchMarkets(COINS)]);
   if (tick.status === 'fulfilled') Object.assign(S.tickers, tick.value);
   if (rate.status === 'fulfilled' && rate.value) { S.rate = rate.value; store.set('rate', S.rate); }
   if (markets.status === 'fulfilled') S.markets = markets.value;
@@ -123,6 +136,7 @@ async function checkAlerts() {
   const now = Date.now();
   for (const { c, a } of ranked()) {
     if (a.verdict !== 'buy') continue;
+    if (S.notifyMode === 'favorites' && !isFav(c.sym)) continue;
     if (now - (S.notified[c.sym] || 0) < 24 * 3600e3) continue;
     S.notified[c.sym] = now; store.set('notified', S.notified);
     const title = `🟢 ${c.name} (${c.sym}) está boa para compra`;
@@ -147,11 +161,22 @@ function toast(html, onClick) {
 // Renderização
 // ---------------------------------------------------------------------------
 function renderAll(soft = false) {
-  renderHome(soft); renderSignals(); renderSim(); if (!soft) renderSettings();
+  renderHome(soft); renderSignals(); renderSim(); if (!soft && document.activeElement?.id !== 'coinSearch') renderSettings();
   const n = ranked().filter(x => x.a.verdict === 'buy').length;
   const b = $('#sigBadge'); b.hidden = !n; b.textContent = n;
   if (S.detail) updateDetailLive(true);
 }
+
+const isFav = sym => S.favs.includes(sym);
+const star = sym => `<span class="star${isFav(sym) ? ' on' : ''}" data-fav="${sym}" role="button" aria-label="Favoritar">${isFav(sym) ? '★' : '☆'}</span>`;
+function toggleFav(sym) {
+  S.favs = isFav(sym) ? S.favs.filter(x => x !== sym) : [...S.favs, sym];
+  store.set('favs', S.favs);
+  navigator.vibrate?.(8);
+  renderAll(true);
+  if (S.detail) { const b = $('#detailFav'); if (b) b.outerHTML = detailStar(S.detail); }
+}
+const detailStar = sym => `<button class="back fav-btn${isFav(sym) ? ' on' : ''}" id="detailFav" data-fav="${sym}" aria-label="Favoritar">${isFav(sym) ? '★' : '☆'}</button>`;
 
 function coinRow(c) {
   const t = S.tickers[c.sym], a = S.analysis[c.sym];
@@ -160,7 +185,7 @@ function coinRow(c) {
   return `<button class="row" data-open="${c.sym}">
     ${coinIcon(c)}
     <div class="meta">
-      <div class="name">${esc(c.name)}</div>
+      <div class="name">${esc(c.name)}${star(c.sym)}</div>
       <div class="sub">${c.sym}${v ? ` <span class="chip ${v.cls}">${a.score}</span>` : ''}</div>
     </div>
     <canvas class="spark" data-spark="${c.sym}"></canvas>
@@ -205,8 +230,12 @@ function renderHome(soft) {
         <div class="opp-txt">${esc(a.reasons.slice(0, 2).join(' · ') || a.summary)}</div>
       </button>`).join('')}</div>`
       : `<div class="empty"><b>Mercado sem sinais fortes.</b> Fique tranquilo: você será notificado quando uma moeda ficar boa para compra.</div>`}
-    <h2 class="section">Mercado <small class="muted">24h</small></h2>
-    <div class="list">${COINS.map(coinRow).join('')}</div>`;
+    <h2 class="section">⭐ Favoritas <small class="muted">${S.favs.length ? 'toque na ★ para remover' : ''}</small></h2>
+    ${S.favs.length ? `<div class="list">${S.favs.filter(f => coinBySym[f]).map(f => coinRow(coinBySym[f])).join('')}</div>`
+      : '<div class="empty">Toque na <b>☆</b> ao lado de qualquer moeda para fixá-la aqui. Você também pode escolher receber notificações só das favoritas em Ajustes.</div>'}
+    <h2 class="section">Mercado <small class="muted">${COINS.length} moedas · 24h</small></h2>
+    <div class="list">${COINS.filter(c => !isFav(c.sym)).map(coinRow).join('')}</div>
+    <button class="btn ghost" data-goto="settings">＋ Adicionar outras moedas</button>`;
   if (soft) $('.opps', el)?.scrollTo(scrollX, 0);
   drawSparks();
 }
@@ -221,12 +250,15 @@ function drawSparks() {
 function renderSignals() {
   const el = $('#view-signals');
   if (S.loading) { el.innerHTML = '<div class="skeleton" style="height:300px;margin-top:10px"></div>'; return; }
+  const list = ranked().filter(({ c }) => S.sigFilter === 'all' || isFav(c.sym));
   el.innerHTML = `<h2 class="section">Ranking de oportunidades <small class="muted">horizonte ${PARAMS.horizon} dias</small></h2>
-    ${ranked().map(({ c, a }) => {
+    <div class="seg" style="margin-bottom:12px"><button data-sigf="all" class="${S.sigFilter === 'all' ? 'on' : ''}">Todas</button><button data-sigf="fav" class="${S.sigFilter === 'fav' ? 'on' : ''}">★ Favoritas</button></div>
+    ${!list.length ? '<div class="empty">Nenhuma favorita ainda. Toque na ☆ de uma moeda para adicioná-la.</div>' : ''}
+    ${list.map(({ c, a }) => {
       const v = VERDICT[a.verdict];
       return `<button class="sig-card" data-open="${c.sym}">
         <div class="top">${coinIcon(c)}
-          <div style="flex:1"><b>${esc(c.name)}</b> <span class="chip ${v.cls}">${v.label}</span>
+          <div style="flex:1"><b>${esc(c.name)}</b>${star(c.sym)} <span class="chip ${v.cls}">${v.label}</span>
             <div class="muted" style="font-size:12px">Acerto histórico do sinal: ${a.statsOk ? pct0(a.bt.winRate) : 'amostra pequena'} · base ${pct0(a.bt.baseWinRate)}</div></div>
           <div class="score num" style="color:${scoreColor(a.score)}">${a.score}</div></div>
         <div class="score-bar"><i style="width:${a.score}%;background-position:${-300 + a.score * 3}px 0"></i></div>
@@ -279,9 +311,19 @@ function renderSettings() {
       <p class="note">No iPhone, notificações só funcionam com o app instalado na Tela de Início (iOS 16.4 ou superior).</p></div>` : ''}
     <div class="card"><h3>🔔 Notificações <span class="chip ${perm === 'granted' ? 'buy' : 'neutral'}">${{ granted: 'ATIVAS', denied: 'BLOQUEADAS', default: 'DESATIVADAS', unsupported: 'INDISPONÍVEL' }[perm]}</span></h3>
       <p class="note" style="margin-top:0">Com o app aberto, os alertas chegam na hora. Para receber <b>com o app fechado</b>, o robô de análise (GitHub Actions) verifica o mercado a cada 30 minutos e envia uma notificação push para este iPhone.</p>
+      <div class="set-row"><div><b>Quais moedas notificar?</b><div class="note" style="margin:2px 0 0">${S.notifyMode === 'favorites' ? `Só as ${S.favs.length} favoritas` : `Todas as ${COINS.length} moedas`}</div></div></div>
+      <div class="seg"><button data-notify="all" class="${S.notifyMode === 'all' ? 'on' : ''}">Todas</button><button data-notify="favorites" class="${S.notifyMode === 'favorites' ? 'on' : ''}">★ Só favoritas</button></div>
+      ${S.pushCfg && S.pushCfg !== JSON.stringify(radarCfg())
+        ? '<div class="err" style="background:rgba(255,209,102,.12);color:var(--gold)">⚠️ Você mudou favoritas, moedas ou o tipo de notificação. Gere e copie o código de novo e atualize o segredo <b>PUSH_SUBSCRIPTIONS</b> no GitHub para o robô saber.</div>' : ''}
       <button class="btn primary" id="enablePush">${perm === 'granted' ? 'Gerar código do aparelho' : 'Ativar notificações'}</button>
       <div id="pushOut"></div>
       <button class="btn ghost" id="testNotif">Enviar notificação de teste</button>
+    </div>
+    <div class="card"><h3>🪙 Moedas acompanhadas <span class="chip neutral">${COINS.length}</span></h3>
+      <p class="note" style="margin-top:0">Adicione qualquer moeda negociada em dólar (USDT) na Binance. Ela ganha gráfico, análise, simulação e alertas.</p>
+      <div class="amount" style="padding:2px 12px"><span>🔎</span><input id="coinSearch" placeholder="Buscar (ex.: JUP, WLD, TAO)" autocomplete="off" autocapitalize="characters" style="font-size:17px;font-weight:600"></div>
+      <div id="coinResults"></div>
+      ${customCoins().length ? `<div class="list" style="margin-top:12px">${customCoins().map(c => `<div class="row">${coinIcon(c)}<div class="meta"><div class="name">${c.sym}</div><div class="sub">adicionada por você</div></div><button class="del" data-rmcoin="${c.sym}" style="color:var(--down)">remover</button></div>`).join('')}</div>` : ''}
     </div>
     <div class="card method"><h3>🧠 Como o app decide</h3>
       <p><b>1. Pontuação (0–100)</b> com 5 grupos de fatores: <b>Tendência</b> (médias de 50/200 dias), <b>Momentum</b> (retorno de 90 dias, MACD), <b>Ponto de entrada</b> (RSI e distância da média de 20 dias — comprar correções dentro de alta, não topos), <b>Volume</b> (fluxo comprador/OBV) e <b>Risco</b> (volatilidade e quedas extremas).</p>
@@ -330,7 +372,7 @@ function renderDetail() {
   const v = a?.ok ? VERDICT[a.verdict] : null;
   $('#sheetInner').innerHTML = `
     <div class="sheet-nav"><button class="back" id="closeSheet" aria-label="Voltar"><svg width="20" height="20" viewBox="0 0 24 24"><path fill="currentColor" d="M15.4 7.4 14 6l-6 6 6 6 1.4-1.4L10.8 12z"/></svg></button>
-      ${v ? `<span class="chip ${v.cls}" style="font-size:12px;padding:5px 10px">${v.label}</span>` : ''}</div>
+      <div style="display:flex;gap:8px;align-items:center">${v ? `<span class="chip ${v.cls}" style="font-size:12px;padding:5px 10px">${v.label}</span>` : ''}${detailStar(sym)}</div></div>
     <div class="d-head">${coinIcon(c, true)}<div><div class="d-name">${esc(c.name)}</div><div class="muted">${sym}${m.rank ? ` · #${m.rank} em valor de mercado` : ''}</div></div></div>
     <div class="d-price num" id="dPrice">${money(p)}</div>
     <div class="d-chg num" id="dChg"></div>
@@ -554,7 +596,9 @@ async function enablePush() {
     const reg = await navigator.serviceWorker.ready;
     let sub = await reg.pushManager.getSubscription();
     if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToUint8(VAPID_PUBLIC_KEY) });
-    const json = JSON.stringify(sub);
+    const cfg = radarCfg();
+    const json = JSON.stringify({ ...sub.toJSON(), radar: cfg });
+    S.pushCfg = JSON.stringify(cfg); store.set('pushCfg', S.pushCfg);
     out.innerHTML = `<p class="note">✅ Notificações no app ativas. Para receber com o app <b>fechado</b>, copie o código abaixo e salve no GitHub em <b>Settings › Secrets and variables › Actions › New repository secret</b> com o nome <b>PUSH_SUBSCRIPTIONS</b> (só precisa fazer uma vez).</p>
       <textarea class="code" readonly id="subJson">${esc(json)}</textarea>
       <button class="btn ghost" id="copySub">Copiar código</button>`;
@@ -564,6 +608,59 @@ async function enablePush() {
   }
 }
 function renderSettingsKeepOut() { /* mantém a mensagem de erro visível */ }
+
+// Configuração que vai junto do código do aparelho, para o robô no GitHub saber o que monitorar
+function radarCfg() {
+  return { notify: S.notifyMode, favs: [...S.favs].sort(), extra: customCoins().map(c => c.sym).sort() };
+}
+
+// ---------------------------------------------------------------------------
+// Adicionar / remover moedas
+// ---------------------------------------------------------------------------
+const customCoins = () => store.get('customCoins', []);
+let searchSeq = 0;
+async function searchCoins(q) {
+  const out = $('#coinResults'); if (!out) return;
+  q = q.trim().toUpperCase();
+  if (!q) { out.innerHTML = ''; return; }
+  const seq = ++searchSeq;
+  out.innerHTML = '<p class="note">Buscando…</p>';
+  try {
+    const all = await fetchAllUsdtSymbols();
+    if (seq !== searchSeq) return;
+    const hits = all.filter(t => t.sym.startsWith(q)).slice(0, 8);
+    out.innerHTML = hits.length ? `<div class="list" style="margin-top:10px">${hits.map(t => {
+      const has = !!coinBySym[t.sym];
+      return `<div class="row">${coinIcon({ sym: t.sym, color: colorFor(t.sym) })}<div class="meta"><div class="name">${t.sym}</div><div class="sub">Volume 24h ${money(t.quoteVol, { compact: true })}</div></div>
+        ${has ? '<span class="chip buy">ADICIONADA</span>' : `<button class="chip watch" style="padding:6px 12px" data-add="${t.sym}">＋ Adicionar</button>`}</div>`;
+    }).join('')}</div>` : '<p class="note">Nenhum par com USDT encontrado na Binance.</p>';
+  } catch { out.innerHTML = '<div class="err">Não foi possível buscar agora. Tente de novo.</div>'; }
+}
+
+async function addCoin(sym) {
+  if (coinBySym[sym]) return;
+  const list = customCoins();
+  list.push({ sym, name: sym, color: colorFor(sym), custom: true });
+  store.set('customCoins', list);
+  buildCoins(); startLive();
+  toast(`✅ <b>${sym}</b> adicionada. Baixando histórico…`);
+  const c = coinBySym[sym];
+  try {
+    const [d, h] = await Promise.all([fetchDaily(sym), fetchKlines(sym, '1h', 168).catch(() => null)]);
+    S.daily[sym] = d; if (h) S.spark[sym] = h.map(k => k.c);
+    S.analysis[sym] = analyze(d);
+    Object.assign(S.tickers, await fetchTickers24h([c]).catch(() => ({})));
+  } catch { toast(`Não consegui baixar os dados de ${sym}.`); }
+  renderAll();
+  const inp = $('#coinSearch'); if (inp) { inp.value = ''; }
+}
+
+function removeCoin(sym) {
+  store.set('customCoins', customCoins().filter(c => c.sym !== sym));
+  S.favs = S.favs.filter(f => f !== sym); store.set('favs', S.favs);
+  delete S.analysis[sym]; delete S.daily[sym];
+  buildCoins(); startLive(); renderAll();
+}
 
 async function testNotif() {
   if (!('Notification' in window)) return toast('Notificações indisponíveis neste navegador.');
@@ -592,6 +689,12 @@ document.addEventListener('click', e => {
   const tab = e.target.closest('.tab'); if (tab) return switchView(tab.dataset.view);
   const del = e.target.closest('[data-del]');
   if (del) { S.positions.splice(+del.dataset.del, 1); store.set('positions', S.positions); renderSim(); return; }
+  const fv = e.target.closest('[data-fav]'); if (fv) { e.preventDefault(); return toggleFav(fv.dataset.fav); }
+  const go = e.target.closest('[data-goto]'); if (go) return switchView(go.dataset.goto);
+  const sf = e.target.closest('[data-sigf]'); if (sf) { S.sigFilter = sf.dataset.sigf; return renderSignals(); }
+  const nm = e.target.closest('[data-notify]'); if (nm) { S.notifyMode = nm.dataset.notify; store.set('notifyMode', S.notifyMode); return renderSettings(); }
+  const add = e.target.closest('[data-add]'); if (add) return addCoin(add.dataset.add);
+  const rm = e.target.closest('[data-rmcoin]'); if (rm) return removeCoin(rm.dataset.rmcoin);
   const open = e.target.closest('[data-open]'); if (open) return openDetail(open.dataset.open);
   if (e.target.closest('#closeSheet')) return closeDetail();
   const rg = e.target.closest('[data-range]');
@@ -615,6 +718,7 @@ document.addEventListener('click', e => {
 });
 
 document.addEventListener('input', e => {
+  if (e.target.id === 'coinSearch') return searchCoins(e.target.value);
   if (e.target.id === 'amt') { S.amount = parseAmount(); store.set('amount', S.amount); updateSim(); }
 });
 
@@ -634,10 +738,15 @@ if ('serviceWorker' in navigator) {
 }
 
 renderAll();
-const live = connectLive(onTick, on => {
-  $('#live').classList.toggle('on', on);
-  $('#liveTxt').textContent = on ? 'Ao vivo' : 'Reconectando…';
-});
+let live;
+function startLive() {
+  live?.close();
+  live = connectLive(COINS, onTick, on => {
+    $('#live').classList.toggle('on', on);
+    $('#liveTxt').textContent = on ? 'Ao vivo' : 'Reconectando…';
+  });
+}
+startLive();
 loadAll().then(() => {
   const q = new URLSearchParams(location.search).get('coin');
   if (q && coinBySym[q]) openDetail(q);

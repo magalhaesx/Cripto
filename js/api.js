@@ -1,6 +1,5 @@
 // Acesso a dados públicos: Binance (candles + tempo real) e CoinGecko (ícones, máx/mín histórica).
 import { BINANCE_REST, BINANCE_WS, COINGECKO } from './config.js';
-import { COINS } from './coins.js';
 
 const REST_FALLBACKS = [BINANCE_REST, 'https://api.binance.com/api/v3'];
 
@@ -46,23 +45,27 @@ export async function fetchUsdBrl() {
   } catch { return null; }
 }
 
-export async function fetchTickers24h() {
-  const syms = JSON.stringify(COINS.map(c => `${c.sym}USDT`));
-  const arr = await binance(`/ticker/24hr?symbols=${encodeURIComponent(syms)}`);
+export async function fetchTickers24h(coins) {
+  const syms = JSON.stringify(coins.map(c => `${c.sym}USDT`));
+  let arr;
+  try { arr = await binance(`/ticker/24hr?symbols=${encodeURIComponent(syms)}`); }
+  catch { // um símbolo inválido derruba o lote inteiro: busca um por um
+    arr = (await Promise.all(coins.map(c => binance(`/ticker/24hr?symbol=${c.sym}USDT`).catch(() => null)))).filter(Boolean);
+  }
   const out = {};
   for (const t of arr) out[t.symbol.replace('USDT', '')] = { price: +t.lastPrice, open: +t.openPrice, high: +t.highPrice, low: +t.lowPrice, quoteVol: +t.quoteVolume, change: +t.priceChangePercent / 100 };
   return out;
 }
 
 // CoinGecko em USD (convertido no app). Cache de 15 min para respeitar o limite gratuito.
-export async function fetchMarkets() {
-  const KEY = 'cg-markets-v1';
+export async function fetchMarkets(coins) {
+  const ids = coins.filter(c => c.id).map(c => c.id).join(',');
+  const KEY = 'cg-markets-v2';
   try {
     const cached = JSON.parse(localStorage.getItem(KEY) || 'null');
-    if (cached && Date.now() - cached.at < 15 * 60e3) return cached.data;
+    if (cached && cached.ids === ids && Date.now() - cached.at < 15 * 60e3) return cached.data;
   } catch {}
   try {
-    const ids = COINS.map(c => c.id).join(',');
     const arr = await getJSON(`${COINGECKO}/coins/markets?vs_currency=usd&ids=${ids}&price_change_percentage=7d`);
     const data = {};
     for (const m of arr) data[m.id] = {
@@ -70,7 +73,7 @@ export async function fetchMarkets() {
       ath: m.ath, athDate: m.ath_date, atl: m.atl, atlDate: m.atl_date,
       supply: m.circulating_supply, change7d: m.price_change_percentage_7d_in_currency / 100,
     };
-    try { localStorage.setItem(KEY, JSON.stringify({ at: Date.now(), data })); } catch {}
+    try { localStorage.setItem(KEY, JSON.stringify({ at: Date.now(), ids, data })); } catch {}
     return data;
   } catch {
     try { return JSON.parse(localStorage.getItem(KEY) || 'null')?.data || {}; } catch { return {}; }
@@ -78,8 +81,8 @@ export async function fetchMarkets() {
 }
 
 // WebSocket com reconexão automática. onTick(sym, {price, open, high, low, quoteVol})
-export function connectLive(onTick, onStatus) {
-  const streams = [...COINS.map(c => `${c.sym.toLowerCase()}usdt@miniTicker`), 'usdtbrl@miniTicker'].join('/');
+export function connectLive(coins, onTick, onStatus) {
+  const streams = [...coins.map(c => `${c.sym.toLowerCase()}usdt@miniTicker`), 'usdtbrl@miniTicker'].join('/');
   let ws, retry = 0, closed = false;
   const open = () => {
     ws = new WebSocket(`${BINANCE_WS}?streams=${streams}`);
@@ -102,4 +105,16 @@ export function connectLive(onTick, onStatus) {
     close() { closed = true; ws?.close(); },
     ensure() { if (!closed && ws && ws.readyState > 1) open(); },
   };
+}
+
+// Todos os pares XXX/USDT negociados na Binance (para buscar e adicionar moedas)
+let allPairs = null;
+export async function fetchAllUsdtSymbols() {
+  if (allPairs) return allPairs;
+  const arr = await binance('/ticker/24hr?type=MINI');
+  allPairs = arr.filter(t => t.symbol.endsWith('USDT') && +t.quoteVolume > 0)
+    .map(t => ({ sym: t.symbol.slice(0, -4), quoteVol: +t.quoteVolume }))
+    .filter(t => !['USDC', 'FDUSD', 'TUSD', 'USDP', 'DAI', 'EUR', 'BUSD'].includes(t.sym))
+    .sort((a, b) => b.quoteVol - a.quoteVol);
+  return allPairs;
 }

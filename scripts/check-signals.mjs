@@ -2,7 +2,7 @@
 // do app e envia notificação push ao iPhone quando uma moeda vira "compra forte".
 import webpush from 'web-push';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
-import { COINS } from '../js/coins.js';
+import { COINS as BASE } from '../js/coins.js';
 import { analyze, PARAMS } from '../js/analysis.js';
 import { VAPID_PUBLIC_KEY } from '../js/config.js';
 
@@ -33,6 +33,13 @@ function subscriptions() {
   return Array.isArray(v) ? v : [v];
 }
 
+const subs = subscriptions();
+// Moedas extras adicionadas no app (vêm junto do código do aparelho)
+const COINS = [...BASE];
+for (const s of subs) for (const sym of s.radar?.extra || []) {
+  if (/^[A-Z0-9]{2,15}$/.test(sym) && !COINS.some(c => c.sym === sym)) COINS.push({ sym, name: sym });
+}
+
 const state = loadState();
 const now = Date.now();
 const alerts = [];
@@ -51,7 +58,6 @@ for (const c of COINS) {
 }
 console.log(table.join('\n'));
 
-const subs = subscriptions();
 const { VAPID_PRIVATE_KEY, VAPID_SUBJECT } = process.env;
 if (!alerts.length) console.log('\nNenhuma nova oportunidade de compra.');
 else if (!subs.length || !VAPID_PRIVATE_KEY) console.log(`\n${alerts.length} alerta(s), mas faltam os segredos PUSH_SUBSCRIPTIONS / VAPID_PRIVATE_KEY.`);
@@ -65,12 +71,14 @@ else {
       tag: `buy-${c.sym}`,
     });
     let delivered = 0;
-    for (const s of subs) {
-      try { await webpush.sendNotification(s, payload, { TTL: 6 * 3600, urgency: 'high' }); delivered++; }
+    const targets = subs.filter(s => s.radar?.notify !== 'favorites' || (s.radar.favs || []).includes(c.sym));
+    if (!targets.length) { console.log(`Alerta ${c.sym}: ignorado (não está nas favoritas).`); continue; }
+    for (const s of targets) {
+      try { await webpush.sendNotification({ endpoint: s.endpoint, keys: s.keys }, payload, { TTL: 6 * 3600, urgency: 'high' }); delivered++; }
       catch (e) { console.error(`Falha ao enviar para um aparelho (${e.statusCode || e.message}). Se for 404/410, gere um novo código no app.`); }
     }
     if (delivered) state[c.sym] = now;
-    console.log(`Alerta ${c.sym}: enviado para ${delivered}/${subs.length} aparelho(s).`);
+    console.log(`Alerta ${c.sym}: enviado para ${delivered}/${targets.length} aparelho(s).`);
   }
 }
 saveState(state);

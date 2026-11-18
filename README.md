@@ -11,7 +11,13 @@ App para iPhone (PWA — instalado pelo Safari, sem App Store) que **avisa quand
 - Notificações push no iPhone, mesmo com o app fechado
 - Visual escuro inspirado em carteiras como a Phantom, com ícone de cada moeda
 
-Moedas: BTC, ETH, SOL, BNB, XRP, ADA, DOGE, AVAX, LINK, DOT, LTC, TRX, SUI, NEAR, TON, POL (edite `js/coins.js` para mudar).
+- **Favoritas**: toque na ☆ de qualquer moeda para fixá-la no topo; filtre os sinais por favoritas
+- **Adicionar moedas**: em Ajustes › Moedas acompanhadas, busque qualquer par com USDT da Binance
+
+Moedas padrão (30): BTC, ETH, SOL, BNB, XRP, ADA, DOGE, AVAX, LINK, DOT, LTC, TRX, SUI, NEAR, TON, POL, BCH, XLM, HBAR, SHIB, PEPE, UNI, AAVE, ATOM, APT, ARB, OP, ICP, FET, RENDER (edite `js/coins.js` para mudar a lista padrão).
+
+### Notificações de moedas extras e "só favoritas"
+O código do aparelho (Ajustes › Gerar código) leva junto suas moedas adicionadas, suas favoritas e se você quer ser avisado de **todas** ou **só das favoritas**. O robô lê isso do segredo `PUSH_SUBSCRIPTIONS`. Sempre que mudar essas escolhas, o app avisa para gerar o código de novo e atualizar o segredo.
 
 ## Como colocar no ar (uma vez só)
 

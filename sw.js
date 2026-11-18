@@ -1,5 +1,5 @@
 // Service worker: cache do app (abre offline) + notificações push.
-const CACHE = 'radar-cripto-v1';
+const CACHE = 'radar-cripto-v2';
 const SHELL = ['./', 'index.html', 'css/app.css', 'js/app.js', 'js/api.js', 'js/analysis.js', 'js/chart.js', 'js/coins.js', 'js/config.js',
   'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
 

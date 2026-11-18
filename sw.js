@@ -1,6 +1,6 @@
 // Service worker: cache do app (abre offline) + notificações push.
-const CACHE = 'radar-cripto-v9';
-const SHELL = ['./', 'index.html', 'css/app.css', 'js/app.js', 'js/api.js', 'js/analysis.js', 'js/chart.js', 'js/coins.js', 'js/config.js', 'js/study.js', 'js/positions.js', 'js/alerts.js',
+const CACHE = 'radar-cripto-v10';
+const SHELL = ['./', 'index.html', 'css/app.css', 'js/app.js', 'js/api.js', 'js/analysis.js', 'js/chart.js', 'js/coins.js', 'js/config.js', 'js/study.js', 'js/positions.js', 'js/alerts.js', 'js/summary.js',
   'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
 
 self.addEventListener('install', e => {

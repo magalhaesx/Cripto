@@ -3,6 +3,7 @@ import { analyze, simulate, applyBreadth, marketRegime, historicalAlerts, PARAMS
 import { STUDY } from './study.js';
 import { firstHit, compactPos, exitMessage } from './positions.js';
 import { alertHit, compactAlert, alertMessage } from './alerts.js';
+import { buildDigest } from './summary.js';
 import { fetchDaily, fetchKlines, fetchTickers24h, fetchUsdBrl, fetchMarkets, connectLive, fetchAllUsdtSymbols, fetchFearGreed, RANGES } from './api.js';
 import { PriceChart, MultiLineChart, drawSpark, drawHistogram, drawScoreRing, drawDonut, drawGauge, drawFngBars, scoreColor } from './chart.js';
 import { VAPID_PUBLIC_KEY, ALERT_LOG_URL, REPO } from './config.js';
@@ -30,6 +31,7 @@ const S = {
   tickers: {}, daily: {}, analysis: {}, markets: {}, spark: {},
   amount: store.get('amount', 1000),
   positions: store.get('positions', []),
+  digest: store.get('digest', { on: true, h: 9 }),   // resumo diário
   alerts: store.get('priceAlerts', []),   // alertas de preço manuais
   wallet: store.get('wallet', null),       // { initialUsd, cashUsd, createdAt }
   hourly: {}, walletRange: '7D',
@@ -730,6 +732,12 @@ function renderSettings() {
       <div class="seg"><button data-notify="all" class="${S.notifyMode === 'all' ? 'on' : ''}">Todas</button><button data-notify="favorites" class="${S.notifyMode === 'favorites' ? 'on' : ''}">★ Só favoritas</button></div>
       ${pushCfgStale()
         ? '<div class="err" style="background:rgba(255,209,102,.12);color:var(--gold)">⚠️ Você mudou favoritas, moedas, compras simuladas, alertas de preço ou o tipo de notificação. Gere e copie o código de novo e atualize o segredo <b>PUSH_SUBSCRIPTIONS</b> no GitHub para o robô saber.</div>' : ''}
+      <div class="set-row" style="margin-top:8px"><div><b>☀️ Resumo diário</b><div class="note" style="margin:2px 0 0">Clima, moedas mais perto do gatilho, oportunidades e suas compras simuladas</div></div></div>
+      <div class="digest-row">
+        <div class="seg"><button data-dgon="1" class="${S.digest.on ? 'on' : ''}">Ligado</button><button data-dgon="0" class="${!S.digest.on ? 'on' : ''}">Desligado</button></div>
+        <select id="dgHour" ${S.digest.on ? '' : 'disabled'}>${Array.from({ length: 17 }, (_, k) => k + 6).map(h => `<option value="${h}" ${h === S.digest.h ? 'selected' : ''}>${String(h).padStart(2, '0')}:00</option>`).join('')}</select>
+      </div>
+      <button class="btn ghost" id="dgPreview" style="margin-top:10px">Ver prévia do resumo</button>
       <button class="btn primary" id="enablePush">${perm === 'granted' ? 'Gerar código do aparelho' : 'Ativar notificações'}</button>
       <div id="pushOut"></div>
       <button class="btn ghost" id="testNotif">Enviar notificação de teste</button>
@@ -1275,7 +1283,8 @@ const pushCfgStale = () => !!S.pushCfg && S.pushCfg !== JSON.stringify(radarCfg(
 function radarCfg() {
   return { notify: S.notifyMode, favs: [...S.favs].sort(), extra: customCoins().map(c => c.sym).sort(),
     pos: S.positions.filter(p => p.status === 'open').map(compactPos),
-    al: S.alerts.filter(a => !a.hitAt).map(compactAlert) };
+    al: S.alerts.filter(a => !a.hitAt).map(compactAlert),
+    dg: { on: S.digest.on, h: S.digest.h, tz: Intl.DateTimeFormat().resolvedOptions().timeZone || 'America/Sao_Paulo' } };
 }
 
 // ---------------------------------------------------------------------------
@@ -1325,6 +1334,22 @@ function removeCoin(sym) {
   S.favs = S.favs.filter(f => f !== sym); store.set('favs', S.favs);
   delete S.analysis[sym]; delete S.daily[sym];
   buildCoins(); startLive(); renderAll();
+}
+
+function currentDigest() {
+  const coins = Object.entries(S.analysis).filter(([, a]) => a?.ok).map(([sym, a]) => ({ sym, score: a.score, verdict: a.verdict }));
+  const favs = S.notifyMode === 'favorites' ? S.favs : null;
+  const buys = coins.filter(c => c.verdict === 'buy' && (!favs || favs.includes(c.sym))).map(c => c.sym);
+  const positions = S.positions.filter(p => p.status !== 'sold' && price(p.sym)).map(p => ({ sym: p.sym, ret: price(p.sym) / p.entry - 1 - PARAMS.costPct }));
+  return buildDigest({ btcChange: S.tickers.BTC?.change ?? null, regime: S.regime?.state, fng: S.fng?.at(-1)?.v ?? null, coins, favs, positions, buys });
+}
+async function previewDigest() {
+  const { title, body } = currentDigest();
+  toast(`<b>${esc(title)}</b><br><span class="muted" style="white-space:pre-line">${esc(body)}</span>`);
+  if ('Notification' in window && Notification.permission === 'granted') {
+    const reg = await navigator.serviceWorker?.getRegistration();
+    reg?.showNotification(title, { body, icon: 'icons/icon-192.png', tag: 'radar-digest', data: { url: './' } });
+  }
 }
 
 async function testNotif() {
@@ -1436,10 +1461,13 @@ document.addEventListener('click', e => {
   if (cb) { S.cur = cb.dataset.cur; store.set('cur', S.cur); renderAll(); if (S.detail) renderDetail(); return; }
   if (e.target.closest('#enablePush')) return enablePush();
   if (e.target.closest('#testNotif')) return testNotif();
+  if (e.target.closest('#dgPreview')) return previewDigest();
+  const dgo = e.target.closest('[data-dgon]'); if (dgo) { S.digest.on = dgo.dataset.dgon === '1'; store.set('digest', S.digest); return renderSettings(); }
   if (e.target.closest('#refreshBtn')) return loadAll();
 });
 
 document.addEventListener('change', e => {
+  if (e.target.id === 'dgHour') { S.digest.h = +e.target.value; store.set('digest', S.digest); renderSettings(); toast(`Resumo diário às ${String(S.digest.h).padStart(2, '0')}:00.${S.pushCfg ? '<br><span class="muted">Atualize o código do aparelho no GitHub.</span>' : ''}`); return; }
   const k = e.target.dataset?.edit; if (!k) return;
   const p = S.positions.find(x => x.id === e.target.dataset.id); if (!p) return;
   const v = parseFloat(e.target.value.replace(',', '.')); if (!(v > 0 && v < 95)) return toast('Valor inválido.');

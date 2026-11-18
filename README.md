@@ -13,6 +13,7 @@ App para iPhone (PWA — instalado pelo Safari, sem App Store) que **avisa quand
 - **Carteira fictícia com painel**: saldo virtual (R$ 10.000 por padrão), compras e vendas que mexem no saldo, gráfico de evolução do patrimônio, distribuição por moeda, lucro realizado/não realizado, ativos agrupados por moeda e histórico de movimentações
 - **Avisos de venda**: cada compra simulada tem stop (limita a perda) e alvo (realiza o lucro), ajustáveis; o app e o robô avisam quando o preço bater um deles ou quando o prazo de 7 dias acabar
 - **Alertas de preço manuais**: "me avise se o BTC passar de R$ 600 mil" — com atalhos de ±5/10%, linha no gráfico e lista no Início
+- **Resumo diário** no horário que você escolher (padrão 9h): clima, oportunidades, próximas candidatas e suas compras simuladas
 - Notificações push no iPhone, mesmo com o app fechado
 - Visual escuro inspirado em carteiras como a Phantom, com ícone de cada moeda
 

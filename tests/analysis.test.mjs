@@ -100,3 +100,12 @@ test('resultado de um alerta: alvo, stop e prazo', () => {
   const r2 = evaluateOutcome({ c: [100, 88], atrPct: [0.05, 0.05] }, cs2, 0, { horizon: 3, costPct: 0 });
   assert.equal(r2.exit, 'stop'); assert.equal(r2.done, false);
 });
+
+import { buildDigest, localHourDate } from '../js/summary.js';
+test('resumo diário', () => {
+  const r = buildDigest({ btcChange: -0.021, regime: 'correction', fng: 11, coins: [{ sym: 'A', score: 50 }, { sym: 'B', score: 99 }, { sym: 'C', score: 70 }, { sym: 'D', score: 10 }], buys: ['B'], positions: [{ sym: 'B', ret: 0.04 }, { sym: 'C', ret: -0.02 }] });
+  assert.match(r.title, /1 oportunidade/);
+  assert.match(r.body, /Próximas candidatas: C 70\/100 · A 50\/100 · D 10\/100/);
+  assert.match(r.body, /média \+1,0%/);
+  assert.equal(localHourDate('America/Sao_Paulo', new Date('2026-11-18T12:30:00Z')).hour, 9);
+});

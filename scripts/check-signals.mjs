@@ -7,6 +7,7 @@ import { analyze, applyBreadth, marketRegime, PARAMS } from '../js/analysis.js';
 import { STUDY } from '../js/study.js';
 import { firstHit, expandPos, exitMessage } from '../js/positions.js';
 import { alertHit, expandAlert, alertMessage } from '../js/alerts.js';
+import { buildDigest, localHourDate } from '../js/summary.js';
 import { VAPID_PUBLIC_KEY } from '../js/config.js';
 
 const BASES = ['https://data-api.binance.vision/api/v3', 'https://api.binance.com/api/v3'];
@@ -178,4 +179,30 @@ for (const sub of subs) {
   }
 }
 console.log(`Alertas de preço verificados: ${alCount}.`);
+
+// ---------------------------------------------------------------------------
+// Resumo diário (uma vez por dia, no horário escolhido no app; padrão 9h)
+// ---------------------------------------------------------------------------
+const hashStr = x => { let h = 0; for (const ch of x) h = (h * 31 + ch.charCodeAt(0)) | 0; return (h >>> 0).toString(36); };
+let btcChange = null;
+try { const r = await fetch(`${BASES[0]}/ticker/24hr?symbol=BTCUSDT`); btcChange = +(await r.json()).priceChangePercent / 100; } catch {}
+const coinsForDigest = Object.entries(results).map(([sym, a]) => ({ sym, score: a.score, verdict: a.verdict }));
+const buysNow = Object.entries(results).filter(([, a]) => a.verdict === 'buy').map(([sym]) => sym);
+for (const sub of subs) {
+  const dg = { on: true, h: 9, tz: 'America/Sao_Paulo', ...(sub.radar?.dg || {}) };
+  if (!dg.on) continue;
+  const { hour, date } = localHourDate(dg.tz);
+  const key = `dg:${hashStr(sub.endpoint)}:${date}`;
+  if (hour !== dg.h || state[key]) continue;
+  const positions = (sub.radar?.pos || []).map(expandPos).filter(p => results[p.sym]).map(p => ({ sym: p.sym, ret: results[p.sym].price / p.entry - 1 - PARAMS.costPct }));
+  const favs = sub.radar?.notify === 'favorites' ? sub.radar.favs : null;
+  const msg = buildDigest({ btcChange, regime: regime?.state, fng: fngNow, coins: coinsForDigest, favs, positions,
+    buys: favs ? buysNow.filter(s => favs.includes(s)) : buysNow });
+  console.log(`Resumo diário (${date} ${dg.h}h ${dg.tz}):\n${msg.title}\n${msg.body}`);
+  if (!VAPID_PRIVATE_KEY) continue;
+  try {
+    await webpush.sendNotification({ endpoint: sub.endpoint, keys: sub.keys }, JSON.stringify({ ...msg, url: SITE, tag: 'radar-digest' }), { TTL: 6 * 3600 });
+    state[key] = now;
+  } catch (e) { console.error(`Resumo diário: falha ${e.statusCode || e.message}`); }
+}
 saveState(state);

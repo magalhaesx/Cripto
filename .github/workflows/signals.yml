@@ -1,7 +1,7 @@
 name: Robô de alertas de compra
 on:
   schedule:
-    - cron: '*/30 * * * *'   # a cada 30 min (o GitHub pode atrasar alguns minutos)
+    - cron: '7,37 * * * *'   # a cada 30 min (minutos 7 e 37; horários cheios costumam atrasar no GitHub)
   workflow_dispatch:
 permissions:
   contents: write   # para gravar o registro oficial de alertas (data/alerts-log.json)

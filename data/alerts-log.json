@@ -1,0 +1,90 @@
+[
+ {
+  "t": 1795026322112,
+  "sym": "ETH",
+  "price": 1771.53,
+  "strong": true,
+  "regime": "correction",
+  "share": 0.333,
+  "rsi": 24,
+  "drop30": -0.2839,
+  "fng": 11
+ },
+ {
+  "t": 1795026322112,
+  "sym": "ADA",
+  "price": 0.1521,
+  "strong": false,
+  "regime": "correction",
+  "share": 0.333,
+  "rsi": 28.4,
+  "drop30": -0.3246,
+  "fng": 11
+ },
+ {
+  "t": 1795026322112,
+  "sym": "DOGE",
+  "price": 0.05898,
+  "strong": false,
+  "regime": "correction",
+  "share": 0.333,
+  "rsi": 27.8,
+  "drop30": -0.2805,
+  "fng": 11
+ },
+ {
+  "t": 1795026322112,
+  "sym": "DOT",
+  "price": 0.717,
+  "strong": false,
+  "regime": "correction",
+  "share": 0.333,
+  "rsi": 25.2,
+  "drop30": -0.3776,
+  "fng": 11
+ },
+ {
+  "t": 1795026322112,
+  "sym": "LTC",
+  "price": 43.93,
+  "strong": false,
+  "regime": "correction",
+  "share": 0.333,
+  "rsi": 28.5,
+  "drop30": -0.2871,
+  "fng": 11
+ },
+ {
+  "t": 1795026322112,
+  "sym": "SHIB",
+  "price": 0.0000038,
+  "strong": false,
+  "regime": "correction",
+  "share": 0.333,
+  "rsi": 27.6,
+  "drop30": -0.2636,
+  "fng": 11
+ },
+ {
+  "t": 1795026322112,
+  "sym": "APT",
+  "price": 0.4314,
+  "strong": true,
+  "regime": "correction",
+  "share": 0.333,
+  "rsi": 23.8,
+  "drop30": -0.4795,
+  "fng": 11
+ },
+ {
+  "t": 1795026322112,
+  "sym": "OP",
+  "price": 0.0761,
+  "strong": false,
+  "regime": "correction",
+  "share": 0.333,
+  "rsi": 28.1,
+  "drop30": -0.4142,
+  "fng": 11
+ }
+]

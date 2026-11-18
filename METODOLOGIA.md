@@ -1,47 +1,58 @@
-# Metodologia
+# Metodologia (v2)
 
-O objetivo é responder: **"historicamente, comprar esta moeda numa situação como a de hoje deu lucro com mais frequência do que comprar num dia qualquer?"** Só há alerta quando a resposta é *sim* com amostra suficiente.
+Pergunta que o app responde: **"historicamente, comprar numa situação como a de hoje deu lucro com mais frequência do que comprar num dia qualquer?"**
 
-## 1. Pontuação (0–100)
+## Estratégia atual: repique após pânico de mercado
 
-Calculada com candles diários (até 1.000 dias da Binance).
+**Gatilho** (dados diários):
+1. Preço **25% ou mais abaixo da máxima dos últimos 30 dias**; e
+2. **RSI(14) < 30** (sobrevenda). RSI < 25 = sinal **forte**; e
+3. **Pânico de mercado**: pelo menos **15% das moedas acompanhadas** estão no gatilho ao mesmo tempo. Queda isolada de uma moeda fica só em "observar".
 
-| Grupo | Pts | Fatores | Base teórica |
-|---|---|---|---|
-| Tendência | 30 | Preço > média 200d (12) · média 50d > 200d (10) · média 200d subindo (8) | Filtros de tendência / médias móveis (Brock, Lakonishok & LeBaron 1992); time-series momentum (Moskowitz, Ooi & Pedersen 2012) |
-| Momentum | 20 | Retorno 90d > 0 (6) · histograma MACD subindo (8) · MACD > sinal (6) | Momentum em cripto (Liu & Tsyvinski 2021, *Review of Financial Studies*) |
-| Ponto de entrada | 25 | RSI(14) entre 30–50 (12; sobrecompra > 70 tira 10) · preço 0,3–2,2 desvios abaixo da média de 20d (13) | Reversão de curto prazo (Jegadeesh 1990): comprar correções dentro de tendência de alta, não topos |
-| Volume | 13 | Volume 5d ≥ média 50d (6) · OBV subindo em 20d (7) | Atenção/fluxo de investidores como preditor (Liu & Tsyvinski 2021) |
-| Risco | 12 | ATR% ≤ mediana do ano (7) · queda < 60% da máxima de 12 meses (5) | Evitar regimes de volatilidade extrema e “facas caindo” |
+**Horizonte:** 7 dias (operação curta: comprar no pânico, reavaliar em ~1 semana).
+**Rebaixamento:** se na própria moeda o padrão teve acerto < 45% em 5+ casos, vira "observar".
 
-## 2. Backtest em cada moeda
+## Como foi escolhida (`research/`)
 
-Para cada dia do histórico (após 210 dias de aquecimento) a pontuação é recalculada **só com dados disponíveis naquele dia** (sem olhar o futuro). Mede‑se o retorno 14 dias depois, já descontando 0,2% de taxas.
+Dados: histórico diário completo de 30 moedas na Binance (2017–2026, ~73 mil dias-moeda). Custo de 0,2% por operação descontado.
 
-Comparação: dias com pontuação ≥ 65 (“dias‑sinal”) vs. todos os dias (base).
+1. **Triagem** (`backtest-strategies.mjs`): ~15 estratégias × prazos de 7/14/30 dias, divididas em **período de estudo** (antes de 2023) e **período de prova** (2023+).
+   - Pontuação antiga (v1): acerto **abaixo** de um dia qualquer no período de prova → descartada.
+   - Rompimentos de máxima, cruzamento de médias, volta acima da MM200, Bollinger, filtros pelo BTC: pareciam bons pela média, mas…
+2. **Robustez** (`robustness.mjs`): agrupando sinais da mesma semana (eles saem juntos em várias moedas), os rompimentos perderam a significância e variavam muito com os parâmetros → descartados. O **repique após queda forte** passou em **todas as 9 variações** testadas (queda 20/25/30% × RSI 25/30/35), com t semanal 2,3–3,4. Escolhemos o centro da grade (25% / RSI 30) para não "escolher a dedo".
+3. **Contexto de mercado** (`market-wide.mjs`): quedas **isoladas** foram inconsistentes (59% antes de 2023, 39% depois). Quedas em **pânico geral** tiveram vantagem nos dois períodos (56% e 66%).
 
-- **Acerto**: % de dias‑sinal com retorno positivo.
-- **Vantagem**: acerto dos sinais − acerto da base.
-- **Episódios independentes**: sinais separados por ≥ 14 dias (evita contar o mesmo movimento várias vezes).
-- **p‑valor**: teste binomial unilateral usando apenas episódios independentes (conservador).
+## Números (gerados em `js/study.js` por `build-study.mjs`)
 
-## 3. Regra do alerta “COMPRA FORTE”
+| | Casos | Subiram em 7 dias |
+|---|---|---|
+| Comprar num dia qualquer | ~67 mil | 46,8% |
+| Gatilho (todos) | 653 | 57,0% |
+| Gatilho em pânico de mercado | 488 | 60,0% |
+| Gatilho forte (RSI < 25) | 126 | 63,5% |
+| Queda isolada | 165 | 47,9% |
 
-Todas as condições:
+Significância (excesso vs. um dia qualquer do mesmo ano, agrupado por semana): t = 2,2 no retorno e t = 3,0 no acerto.
 
-- pontuação atual ≥ 65 e RSI < 72;
-- ≥ 20 dias‑sinal e ≥ 5 episódios independentes;
-- acerto ≥ 55% **e** pelo menos 3 p.p. acima da base;
-- retorno mediano dos sinais > 0.
-
-Outros estados: **Observar** (perto do limiar ou sem validação), **Neutro**, **Evitar** (pontuação < 35 ou RSI > 75).
-
-## 4. Simulação
-
-Usa a **distribuição empírica** dos retornos de 14 dias após os sinais daquela moeda: pessimista = percentil 10, provável = mediana, otimista = percentil 90; chance de lucro = fração de casos positivos. Stop sugerido = preço − 2×ATR; alvo = preço + 3×ATR.
+**Ano a ano (pânico de mercado):** 2018 44% · 2019 60% · 2020 100% · 2021 60% · 2022 48% · 2023 86% · 2024 63% · 2025 71% · 2026 50%.
 
 ## Limitações honestas
 
-- ~2,7 anos de dados diários é pouco para ciclos de cripto; o mercado muda de regime.
-- Os parâmetros (65 pontos, 14 dias) foram escolhidos a priori, não otimizados — isso evita *overfitting*, mas não garante desempenho.
-- Eventos externos (regulação, hacks, falências) não aparecem nos indicadores.
+- Em **mercados de baixa prolongados** (2018, 2022, 2026) o acerto fica perto de 50%: a queda continua.
+- O filtro de "pânico de mercado" foi identificado depois de olhar os dados; tem lógica econômica (queda isolada costuma ser notícia ruim da própria moeda; pânico geral costuma ser venda forçada/liquidez), mas ainda precisa ser confirmado com dados futuros.
+- Mediana do ganho em 7 dias é modesta (~+1,5% a +3%); os 10% piores casos perdem 12–19%. Use o stop.
+- Sinais em várias moedas no mesmo dia são correlacionados: se der errado, tende a dar errado em todas juntas. Não concentre tudo.
+
+## Simulação
+
+Distribuição empírica dos retornos de 7 dias após o gatilho — da própria moeda (se tiver 10+ casos) ou do estudo completo. Pessimista = percentil 10, provável = mediana, otimista = percentil 90.
+
+## Reproduzir
+
+```bash
+node research/fetch-history.mjs research/data      # baixa o histórico (precisa de acesso à Binance)
+node research/backtest-strategies.mjs research/data
+node research/robustness.mjs research/data
+node research/market-wide.mjs research/data
+node research/build-study.mjs research/data         # regenera js/study.js
+```

@@ -4,8 +4,8 @@ App para iPhone (PWA — instalado pelo Safari, sem App Store) que **avisa quand
 
 - Gráficos em tempo real, coloridos e interativos (arraste o dedo para ver preço e data)
 - Preço ao vivo, máxima e mínima histórica, máx./mín. 24h, volume, valor de mercado
-- Pontuação 0–100 por moeda + explicação curta do porquê
-- **Prova estatística**: a regra é testada em ~1.000 dias de cada moeda
+- **Estratégia validada em estudo**: repique após pânico de mercado (queda ≥25% em 30 dias + RSI<30 + várias moedas caindo juntas) — 60% de acerto em 7 dias vs 47% de um dia qualquer, em 30 moedas desde 2017
+- Distância do gatilho (0–100) por moeda + explicação curta do porquê
 - **Simulação**: digite quanto quer investir e veja cenários pessimista/provável/otimista e a chance de lucro, baseados em casos reais
 - **Carteira simulada**: "compre" sem dinheiro e acompanhe o lucro/prejuízo ao vivo
 - Notificações push no iPhone, mesmo com o app fechado

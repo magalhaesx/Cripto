@@ -2,3 +2,4 @@ node_modules/
 .state/
 _site/
 .DS_Store
+research/data/

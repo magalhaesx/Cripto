@@ -2,24 +2,24 @@
 // Motor de análise — usado tanto pelo app (navegador) quanto pelo robô de
 // notificações (GitHub Actions / Node). Funções puras, sem dependências.
 //
-// Ideia central: NÃO confiar em "achismo". Cada moeda recebe uma pontuação
-// (0–100) feita de fatores com respaldo na literatura (tendência, momentum,
-// reversão de curto prazo, volume e volatilidade). Em seguida a MESMA regra é
-// testada no histórico daquela moeda (backtest): só existe alerta de compra se,
-// no passado, os dias com pontuação parecida tiveram taxa de acerto e retorno
-// mediano superiores aos de um dia qualquer, com amostra mínima.
-// Detalhes e referências: METODOLOGIA.md
+// ESTRATÉGIA (v2, escolhida por estudo com 30 moedas e histórico desde 2017 —
+// ver research/ e METODOLOGIA.md): "REPIQUE APÓS QUEDA FORTE".
+//   Gatilho: preço 25%+ abaixo da máxima dos últimos 30 dias  E  RSI(14) < 30.
+//   Horizonte: 7 dias. Nível "forte" quando RSI(14) < 25.
+// Foi a única abordagem, entre ~15 testadas, com vantagem nos dois períodos
+// (antes e depois de 2023), em todas as variações de parâmetros e com
+// estatística robusta mesmo agrupando sinais da mesma semana.
 // =============================================================================
 
 export const PARAMS = {
-  horizon: 14,        // dias à frente usados para medir "deu lucro?"
-  threshold: 65,      // pontuação mínima para um sinal de compra
-  minSignalDays: 20,  // nº mínimo de dias-sinal no histórico
-  minEvents: 5,       // nº mínimo de episódios independentes (separados por >= horizon)
-  minWinRate: 0.55,   // taxa de acerto mínima
-  minEdge: 0.03,      // vantagem mínima sobre um dia aleatório (3 p.p.)
+  horizon: 7,         // dias à frente usados para medir "deu lucro?"
+  dropPct: -0.25,     // queda mínima em relação à máxima de 30 dias
+  rsiMax: 30,         // RSI(14) abaixo disto
+  rsiStrong: 25,      // RSI(14) abaixo disto = sinal forte
+  minBreadth: 0.15,   // alerta só se >= 15% das moedas estiverem no gatilho juntas (pânico de mercado)
+  minCoinWin: 0.45,   // se a própria moeda tiver >=5 casos e acerto abaixo disto, rebaixa para "observar"
   costPct: 0.002,     // custo ida+volta (taxas/spread) = 0,2%
-  warmup: 210,        // candles necessários antes de começar a pontuar
+  warmup: 210,        // candles necessários para os indicadores de contexto (MM200)
 };
 
 // ---------- indicadores básicos ----------------------------------------------
@@ -140,8 +140,9 @@ export function computeIndicators(candles) {
 
   const vol5 = sma(v, 5), vol50 = sma(v, 50);
   const high365 = rollingMax(c, 365);
+  const high30 = rollingMax(c, 30);
 
-  return { c, v, sma20, sma50, sma200, std20, macd, macdSig, hist, rsi14, atr, atrPct, obv, vol5, vol50, high365 };
+  return { c, v, sma20, sma50, sma200, std20, macd, macdSig, hist, rsi14, atr, atrPct, obv, vol5, vol50, high365, high30 };
 }
 
 // mediana móvel do ATR% (último ano) — calculada sob demanda
@@ -154,7 +155,8 @@ function atrMedianAt(ind, i) {
 
 const br = (x, d = 1) => x.toFixed(d).replace('.', ',');
 
-// ---------- pontuação de um dia ---------------------------------------------
+// ---------- REGRA ANTIGA (v1) — mantida só para comparação nos estudos ----------
+// Não é mais usada para alertas: no período 2023+ teve acerto ABAIXO de um dia qualquer.
 // Retorna {score, parts}. parts traz cada fator, pontos e texto explicativo.
 export function scoreAt(ind, i, opts = {}) {
   const { c, sma20, sma50, sma200, std20, macd, macdSig, hist, rsi14, atrPct, obv, vol5, vol50, high365 } = ind;
@@ -226,128 +228,156 @@ export function scoreAt(ind, i, opts = {}) {
   return { score, parts, rsi: r, z, atrPct: atrPct[i], dd, ret90, above200 };
 }
 
+// ---------- gatilho da estratégia -------------------------------------------
+// Retorna false, 'normal' ou 'strong'
+export function isTrigger(ind, i, P = PARAMS) {
+  const r = ind.rsi14[i], hi = ind.high30[i];
+  if (r == null || !hi) return false;
+  if (ind.c[i] / hi - 1 > P.dropPct || r >= P.rsiMax) return false;
+  return r < P.rsiStrong ? 'strong' : 'normal';
+}
+
+// Proximidade do gatilho (0–100). 100 = gatilho disparado.
+// Metade pela queda (0% → 0 pts, -25% → 50 pts) e metade pelo RSI (60 → 0 pts, 30 → 50 pts).
+export function proximity(ind, i, P = PARAMS) {
+  const dd = ind.c[i] / ind.high30[i] - 1;
+  const r = ind.rsi14[i] ?? 50;
+  const a = Math.max(0, Math.min(1, dd / P.dropPct)) * 50;
+  const b = Math.max(0, Math.min(1, (60 - r) / (60 - P.rsiMax))) * 50;
+  return Math.round(a + b);
+}
+
 // ---------- backtest da regra na própria moeda --------------------------------
 export function backtest(candles, ind, P = PARAMS) {
-  const n = candles.length;
-  const H = P.horizon;
-  const scores = new Array(n).fill(null);
-  for (let i = P.warmup; i < n; i++) scores[i] = scoreAt(ind, i).score;
-
-  const sig = [], base = [];
-  let lastEvent = -Infinity, events = 0, eventWins = 0;
-  const onsets = [];
-  for (let i = P.warmup; i < n; i++) {
-    const isSig = scores[i] >= P.threshold;
-    if (isSig && (scores[i - 1] == null || scores[i - 1] < P.threshold)) onsets.push(i);
+  const n = candles.length, H = P.horizon;
+  const sig = [], base = [], onsets = [];
+  let last = -Infinity, prev = false;
+  for (let i = 30; i < n; i++) {
+    const g = isTrigger(ind, i, P);
+    if (g && !prev) onsets.push(i);
+    prev = !!g;
     if (i + H >= n) continue;
     const fwd = ind.c[i + H] / ind.c[i] - 1 - P.costPct;
     base.push(fwd);
-    if (isSig) {
-      sig.push(fwd);
-      if (i - lastEvent >= H) { events++; if (fwd > 0) eventWins++; lastEvent = i; }
-    }
+    if (g && i - last >= H) { sig.push(fwd); last = i; }   // episódios independentes
   }
   const win = a => (a.length ? a.filter(x => x > 0).length / a.length : null);
-  const mean = a => (a.length ? a.reduce((s, x) => s + x, 0) / a.length : null);
-  const sortedSig = [...sig].sort((a, b) => a - b);
-  const winRate = win(sig), baseWin = win(base);
-
-  // teste binomial (unilateral) usando apenas episódios independentes — conservador
-  let pValue = null;
-  if (events > 0 && baseWin > 0 && baseWin < 1) {
-    const p = eventWins / events;
-    const zb = (p - baseWin) / Math.sqrt(baseWin * (1 - baseWin) / events);
-    pValue = 1 - normCdf(zb);
-  }
-
+  const sorted = [...sig].sort((a, b) => a - b);
   return {
-    scores, onsets,
-    horizon: H,
-    days: n,
-    signalDays: sig.length,
-    events,
-    eventWinRate: events ? eventWins / events : null,
-    winRate, baseWinRate: baseWin,
-    meanRet: mean(sig), baseMeanRet: mean(base),
+    onsets, horizon: H, days: n,
+    events: sig.length, signalDays: sig.length,
+    winRate: win(sig), baseWinRate: win(base),
     medianRet: median(sig), baseMedianRet: median(base),
-    p10: quantile(sortedSig, 0.10), p25: quantile(sortedSig, 0.25),
-    p75: quantile(sortedSig, 0.75), p90: quantile(sortedSig, 0.90),
-    worst: sortedSig[0] ?? null, best: sortedSig[sortedSig.length - 1] ?? null,
-    distribution: sortedSig,
-    pValue,
+    meanRet: sig.length ? sig.reduce((a, b) => a + b, 0) / sig.length : null,
+    p10: quantile(sorted, 0.1), p90: quantile(sorted, 0.9),
+    distribution: sorted,
   };
 }
 
 // ---------- análise completa --------------------------------------------------
-export function analyze(candles, P = PARAMS) {
-  if (!candles || candles.length < P.warmup + P.horizon + 30) {
-    return { ok: false, reason: 'Histórico insuficiente para análise estatística (moeda recente).' };
+// study: estatística agregada (js/study.js). Opcional — sem ela a análise usa só a moeda.
+export function analyze(candles, P = PARAMS, study = null) {
+  if (!candles || candles.length < 60) {
+    return { ok: false, reason: 'Histórico insuficiente para análise (moeda muito recente).' };
   }
   const ind = computeIndicators(candles);
   const i = candles.length - 1;
-  const now = scoreAt(ind, i);
   const bt = backtest(candles, ind, P);
+  const trig = isTrigger(ind, i, P);
+  const score = proximity(ind, i, P);
+  const price = ind.c[i];
+  const rsiNow = ind.rsi14[i];
+  const dd30 = price / ind.high30[i] - 1;
+  const above200 = ind.sma200[i] != null ? price > ind.sma200[i] : null;
 
-  const statsOk = bt.signalDays >= P.minSignalDays && bt.events >= P.minEvents;
-  const edge = bt.winRate != null && bt.baseWinRate != null ? bt.winRate - bt.baseWinRate : null;
-  const ruleWorks = statsOk && bt.winRate >= P.minWinRate && edge >= P.minEdge && bt.medianRet > 0;
-
+  const coinWeak = bt.events >= 5 && bt.winRate < P.minCoinWin;
   let verdict;
-  if (now.score >= P.threshold && ruleWorks && (now.rsi ?? 50) < 72) verdict = 'buy';
-  else if (now.score >= P.threshold - 10) verdict = 'watch';
-  else if (now.score < 35 || (now.rsi ?? 50) > 75) verdict = 'avoid';
+  if (trig && !coinWeak) verdict = 'buy';
+  else if (trig || score >= 70) verdict = 'watch';
+  else if ((rsiNow ?? 50) > 70) verdict = 'avoid';
   else verdict = 'neutral';
 
-  // gestão de risco baseada em ATR
-  const price = ind.c[i];
-  const atr = ind.atr[i] ?? price * 0.04;
-  const stop = price - 2 * atr;
-  const target = price + 3 * atr;
+  const pc = x => `${Math.round(x * 100)}%`;
+  const br1 = x => `${x >= 0 ? '+' : ''}${br(x * 100)}%`;
+  const parts = [
+    { group: 'Gatilho', key: 'drop', ok: dd30 <= P.dropPct, pts: Math.round(Math.max(0, Math.min(1, dd30 / P.dropPct)) * 50), max: 50,
+      text: `Queda de ${br(Math.abs(dd30) * 100)}% desde a máxima de 30 dias (gatilho: 25% ou mais)` },
+    { group: 'Gatilho', key: 'rsi', ok: rsiNow != null && rsiNow < P.rsiMax, pts: Math.round(Math.max(0, Math.min(1, (60 - (rsiNow ?? 50)) / (60 - P.rsiMax))) * 50), max: 50,
+      text: `RSI ${rsiNow != null ? rsiNow.toFixed(0) : '—'} (gatilho: abaixo de 30${rsiNow != null && rsiNow < P.rsiStrong ? '; abaixo de 25 = sinal forte' : ''})` },
+    { group: 'Contexto', key: 'trend', ok: !!above200, pts: 0, max: 0,
+      text: above200 == null ? 'Média de 200 dias indisponível' : above200 ? 'Acima da média de 200 dias (tendência longa de alta)' : 'Abaixo da média de 200 dias (tendência longa de baixa)' },
+  ];
 
-  const fmtP = x => `${(x * 100).toFixed(0)}%`;
-  const fmtR = x => `${x >= 0 ? '+' : ''}${br(x * 100)}%`;
-  const reasons = now.parts.filter(p => p.ok && p.pts > 0).sort((a, b) => b.pts - a.pts).slice(0, 4).map(p => p.text);
-  const warnings = now.parts.filter(p => !p.ok && p.max >= 6).sort((a, b) => b.max - a.max).slice(0, 3).map(p => p.text);
+  const reasons = [], warnings = [];
+  if (trig) {
+    reasons.push(`Caiu ${br(Math.abs(dd30) * 100)}% em relação à máxima de 30 dias — pânico de curto prazo`);
+    reasons.push(`RSI ${rsiNow.toFixed(0)}: ${trig === 'strong' ? 'sobrevenda extrema' : 'sobrevendido'}, vendedores esgotados`);
+    if (study) reasons.push(`No estudo com ${study.coins} moedas (${study.events} casos desde ${study.from.slice(0, 4)}), ${trig === 'strong' ? pc(study.strongWinRate) : pc(study.winRate)} subiram em ${P.horizon} dias, contra ${pc(study.baseWinRate)} num dia qualquer`);
+  } else {
+    if (dd30 > P.dropPct) warnings.push(`Queda de só ${br(Math.abs(dd30) * 100)}% da máxima de 30 dias (gatilho: 25%)`);
+    if (rsiNow != null && rsiNow >= P.rsiMax) warnings.push(`RSI ${rsiNow.toFixed(0)}: ainda não está sobrevendido (gatilho: < 30)`);
+  }
+  if (coinWeak) warnings.push(`Nesta moeda o padrão funcionou pouco: ${pc(bt.winRate)} de acerto em ${bt.events} casos`);
+  if (above200 === false && trig) warnings.push('Tendência longa de baixa: é uma operação curta de repique, não de longo prazo');
 
-  let statsText;
-  if (!statsOk) statsText = `Poucos casos parecidos no histórico (${bt.events} episódios) — a estatística ainda não é confiável para esta moeda.`;
-  else statsText = `Nos últimos ${br(candles.length / 365)} anos, em ${bt.events} episódios com sinal parecido, ` +
-    `a moeda estava mais alta ${P.horizon} dias depois em ${fmtP(bt.winRate)} dos dias-sinal ` +
-    `(mediana ${fmtR(bt.medianRet)}), contra ${fmtP(bt.baseWinRate)} em um dia qualquer (mediana ${fmtR(bt.baseMedianRet)}).`;
+  const statsText = bt.events
+    ? `Nesta moeda (últimos ${br(candles.length / 365)} anos), o gatilho disparou ${bt.events} vezes e o preço estava mais alto ${P.horizon} dias depois em ${pc(bt.winRate)} delas (mediana ${br1(bt.medianRet)}), contra ${pc(bt.baseWinRate)} num dia qualquer.`
+    : `O gatilho ainda não disparou nesta moeda nos últimos ${br(candles.length / 365)} anos; a simulação usa o estudo com todas as moedas.`;
 
   let summary;
-  if (verdict === 'buy') summary = `Boa oportunidade: ${reasons.slice(0, 2).join('; ').toLowerCase()}. ${statsText}`;
-  else if (verdict === 'watch') summary = now.score >= P.threshold
-    ? `Pontuação alta (${now.score}/100), mas ${!ruleWorks ? 'o histórico desta moeda ainda não comprova vantagem estatística suficiente — por isso não há alerta.' : 'o RSI indica euforia; melhor esperar uma correção.'}`
-    : `Quase lá: pontuação ${now.score}/100 (alerta a partir de ${P.threshold}). Fique de olho.`;
-  else if (verdict === 'avoid') summary = `Evitar agora: ${warnings.slice(0, 2).join('; ').toLowerCase()}.`;
-  else summary = `Sem vantagem clara no momento (pontuação ${now.score}/100).`;
+  if (verdict === 'buy') summary = `Oportunidade de repique${trig === 'strong' ? ' FORTE' : ''}: ${reasons[0].toLowerCase()} e RSI ${rsiNow.toFixed(0)}. Estratégia de curto prazo: comprar agora e reavaliar em ~${P.horizon} dias.`;
+  else if (verdict === 'watch' && trig) summary = 'O gatilho disparou, mas nesta moeda o padrão teve acerto baixo no passado. Alerta rebaixado para "observar".';
+  else if (verdict === 'watch') summary = `Perto do gatilho (${score}/100): ${warnings.join('; ').toLowerCase()}.`;
+  else if (verdict === 'avoid') summary = `Evitar agora: RSI ${rsiNow.toFixed(0)} indica euforia — preço esticado.`;
+  else summary = `Sem oportunidade no momento (${score}/100 do caminho até o gatilho).`;
 
+  const atr = ind.atr[i] ?? price * 0.05;
   return {
-    ok: true, score: now.score, verdict, parts: now.parts, reasons, warnings, summary, statsText,
-    rsi: now.rsi, z: now.z, atrPct: now.atrPct, dd: now.dd, ret90: now.ret90, above200: now.above200,
-    price, stop, target, edge, ruleWorks, statsOk, bt,
-    signalTimes: bt.onsets.map(k => candles[k].t),
-    scoreSeries: bt.scores,
+    ok: true, score, verdict, trigger: trig, parts, reasons, warnings, summary, statsText,
+    rsi: rsiNow, dd30, atrPct: ind.atrPct[i], above200, price,
+    stop: price - 2 * atr, target: price + 2 * atr,
+    ruleWorks: !coinWeak, statsOk: true, edge: bt.winRate != null ? bt.winRate - bt.baseWinRate : null,
+    bt, study, signalTimes: bt.onsets.map(k => candles[k].t),
   };
 }
 
+// ---------- contexto de mercado ----------------------------------------------
+// Queda ISOLADA de uma moeda (provável notícia ruim própria) teve repique inconsistente;
+// pânico GERAL (várias moedas no gatilho ao mesmo tempo) teve vantagem nos dois períodos.
+// Recebe {sym: análise} de todas as moedas e ajusta o veredito de cada uma.
+export function applyBreadth(analyses, P = PARAMS, study = null) {
+  const list = Object.values(analyses).filter(a => a?.ok);
+  const trig = list.filter(a => a.trigger).length;
+  const share = list.length ? trig / list.length : 0;
+  for (const a of list) {
+    // idempotente: sempre parte do resultado original da análise
+    a._base ||= { verdict: a.verdict, summary: a.summary, reasons: [...a.reasons], warnings: [...a.warnings] };
+    Object.assign(a, { verdict: a._base.verdict, summary: a._base.summary, reasons: [...a._base.reasons], warnings: [...a._base.warnings] });
+    a.breadth = { triggered: trig, total: list.length, share };
+    if (!a.trigger) continue;
+    if (share < P.minBreadth) {
+      if (a.verdict === 'buy') a.verdict = 'watch';
+      a.warnings.unshift(`Queda isolada (só ${trig} de ${list.length} moedas no gatilho): no histórico recente, quedas isoladas não tiveram repique confiável`);
+      a.summary = 'Gatilho disparou, mas é uma queda isolada desta moeda — historicamente pouco confiável. Fica em "observar".';
+    } else {
+      a.reasons.splice(2, 0, `Pânico de mercado: ${trig} de ${list.length} moedas no gatilho ao mesmo tempo${study?.breadth ? ` (nesse cenário, ${Math.round(study.breadth.panicWinRate * 100)}% subiram em ${P.horizon} dias)` : ''}`);
+    }
+  }
+  return share;
+}
+
 // ---------- simulação de compra --------------------------------------------
-// Usa a distribuição EMPÍRICA dos retornos após sinais (não um palpite).
+// Usa a distribuição EMPÍRICA dos retornos de 7 dias após o gatilho: da própria moeda se tiver
+// 10+ casos; senão, a do estudo com todas as moedas.
 export function simulate(amount, analysis) {
-  const bt = analysis?.bt;
-  const dist = bt?.distribution?.length >= 10 ? bt.distribution : null;
-  if (!dist) return null;
+  const own = analysis?.bt?.distribution;
+  const dist = own?.length >= 10 ? own : analysis?.study?.dist;
+  if (!dist?.length) return null;
   const q = p => amount * (1 + quantile(dist, p));
   return {
-    amount,
-    horizon: bt.horizon,
-    pessimistic: q(0.10),
-    low: q(0.25),
-    median: q(0.5),
-    high: q(0.75),
-    optimistic: q(0.90),
-    probProfit: dist.filter(x => x > 0).length / dist.length,
+    amount, horizon: analysis.bt.horizon, source: dist === own ? 'coin' : 'study', cases: dist === own ? own.length : analysis.study.events,
+    pessimistic: q(0.10), low: q(0.25), median: q(0.5), high: q(0.75), optimistic: q(0.90),
+    probProfit: dist === own ? dist.filter(x => x > 0).length / dist.length : analysis.study.winRate,
     expected: amount * (1 + dist.reduce((s, x) => s + x, 0) / dist.length),
     dist,
   };

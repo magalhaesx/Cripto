@@ -1,5 +1,6 @@
 import { COINS as BASE_COINS, colorFor } from './coins.js';
-import { analyze, simulate, PARAMS } from './analysis.js';
+import { analyze, simulate, applyBreadth, PARAMS } from './analysis.js';
+import { STUDY } from './study.js';
 import { fetchDaily, fetchKlines, fetchTickers24h, fetchUsdBrl, fetchMarkets, connectLive, fetchAllUsdtSymbols, RANGES } from './api.js';
 import { PriceChart, drawSpark, drawHistogram, drawScoreRing, scoreColor } from './chart.js';
 import { VAPID_PUBLIC_KEY } from './config.js';
@@ -70,9 +71,9 @@ const fmtDateTime = (t, range) => new Date(t).toLocaleString('pt-BR', range === 
 const qty = (q, sym) => `${q.toLocaleString('pt-BR', { maximumSignificantDigits: 6 })} ${sym}`;
 
 const VERDICT = {
-  buy: { label: 'COMPRA FORTE', title: 'Ótimo momento de compra', cls: 'buy' },
-  watch: { label: 'OBSERVAR', title: 'Quase no ponto', cls: 'watch' },
-  neutral: { label: 'NEUTRO', title: 'Sem vantagem clara', cls: 'neutral' },
+  buy: { label: 'COMPRAR', title: 'Oportunidade de repique', cls: 'buy' },
+  watch: { label: 'OBSERVAR', title: 'Perto do gatilho', cls: 'watch' },
+  neutral: { label: 'NEUTRO', title: 'Sem oportunidade agora', cls: 'neutral' },
   avoid: { label: 'EVITAR', title: 'Melhor esperar', cls: 'avoid' },
 };
 
@@ -100,9 +101,10 @@ async function loadAll() {
     const [d, h] = await Promise.all([fetchDaily(c.sym), fetchKlines(c.sym, '1h', 168).catch(() => null)]);
     S.daily[c.sym] = d;
     if (h) S.spark[c.sym] = h.map(k => k.c);
-    S.analysis[c.sym] = analyze(d);
+    S.analysis[c.sym] = analyze(d, PARAMS, STUDY);
   }));
   const failed = results.filter(r => r.status === 'rejected').length;
+  applyBreadth(S.analysis, PARAMS, STUDY);
   if (failed === COINS.length) S.error = 'Não foi possível baixar os dados de mercado. Verifique a internet e toque em atualizar.';
   S.loading = false;
   $('#refreshBtn').classList.remove('spin');
@@ -117,8 +119,9 @@ function reanalyze() {
     if (!d?.length || !p) continue;
     const last = d[d.length - 1];
     last.c = p; last.h = Math.max(last.h, p); last.l = Math.min(last.l, p);
-    S.analysis[c.sym] = analyze(d);
+    S.analysis[c.sym] = analyze(d, PARAMS, STUDY);
   }
+  applyBreadth(S.analysis, PARAMS, STUDY);
   renderAll(true);
   checkAlerts();
 }
@@ -134,18 +137,28 @@ function ranked() {
 // ---------------------------------------------------------------------------
 async function checkAlerts() {
   const now = Date.now();
-  for (const { c, a } of ranked()) {
-    if (a.verdict !== 'buy') continue;
-    if (S.notifyMode === 'favorites' && !isFav(c.sym)) continue;
-    if (now - (S.notified[c.sym] || 0) < 24 * 3600e3) continue;
-    S.notified[c.sym] = now; store.set('notified', S.notified);
-    const title = `🟢 ${c.name} (${c.sym}) está boa para compra`;
-    const body = `Pontuação ${a.score}/100 · chance histórica de alta em ${PARAMS.horizon}d: ${pct0(a.bt.winRate)}. ${a.reasons[0] || ''}`;
-    toast(`<b>${esc(title)}</b><br><span class="muted">${esc(body)}</span>`, () => openDetail(c.sym));
-    if ('Notification' in window && Notification.permission === 'granted') {
-      const reg = await navigator.serviceWorker?.getRegistration();
-      reg?.showNotification(title, { body, icon: 'icons/icon-192.png', badge: 'icons/icon-192.png', tag: `buy-${c.sym}`, data: { url: `./?coin=${c.sym}` } });
-    }
+  const fresh = ranked().filter(({ c, a }) => a.verdict === 'buy'
+    && (S.notifyMode !== 'favorites' || isFav(c.sym))
+    && now - (S.notified[c.sym] || 0) >= 24 * 3600e3);
+  if (!fresh.length) return;
+  fresh.forEach(({ c }) => { S.notified[c.sym] = now; });
+  store.set('notified', S.notified);
+  let title, body, url, open;
+  if (fresh.length >= 3) {   // várias de uma vez: um aviso só, sem encher a tela
+    const strong = fresh.filter(x => x.a.trigger === 'strong').map(x => x.c.sym);
+    title = `🟢 Pânico no mercado: ${fresh.length} moedas em oportunidade de repique`;
+    body = `${fresh.map(x => x.c.sym).join(', ')}.${strong.length ? ` Sinal forte: ${strong.join(', ')}.` : ''} Historicamente ${pct0(STUDY.breadth?.panicWinRate ?? STUDY.winRate)} subiram em ${PARAMS.horizon} dias.`;
+    url = './'; open = () => switchView('signals');
+  } else {
+    const { c, a } = fresh[0];
+    title = `🟢 ${c.name} (${c.sym}): oportunidade de repique${a.trigger === 'strong' ? ' FORTE' : ''}`;
+    body = `${a.reasons[0] || ''}. Historicamente ${pct0(a.trigger === 'strong' ? STUDY.strongWinRate : STUDY.winRate)} subiram em ${PARAMS.horizon} dias.${fresh[1] ? ` Também: ${fresh[1].c.sym}.` : ''}`;
+    url = `./?coin=${c.sym}`; open = () => openDetail(c.sym);
+  }
+  toast(`<b>${esc(title)}</b><br><span class="muted">${esc(body)}</span>`, open);
+  if ('Notification' in window && Notification.permission === 'granted') {
+    const reg = await navigator.serviceWorker?.getRegistration();
+    reg?.showNotification(title, { body, icon: 'icons/icon-192.png', badge: 'icons/icon-192.png', tag: 'radar-buy', data: { url } });
   }
 }
 
@@ -221,7 +234,7 @@ function renderHome(soft) {
       </div>
     </div>
     ${S.error ? `<div class="err">${S.error}</div>` : ''}
-    <h2 class="section">Destaques <small class="muted">score 0–100</small></h2>
+    <h2 class="section">Destaques <small class="muted">distância do gatilho 0–100</small></h2>
     ${opps.length ? `<div class="opps">${opps.map(({ c, a }) => `
       <button class="opp ${a.verdict}" data-open="${c.sym}">
         <div class="opp-head">${coinIcon(c)}<div class="grow"><b>${c.sym}</b><div class="muted num" style="font-size:13px" data-price="${c.sym}">${money(price(c.sym))}</div></div>
@@ -259,7 +272,7 @@ function renderSignals() {
       return `<button class="sig-card" data-open="${c.sym}">
         <div class="top">${coinIcon(c)}
           <div style="flex:1"><b>${esc(c.name)}</b>${star(c.sym)} <span class="chip ${v.cls}">${v.label}</span>
-            <div class="muted" style="font-size:12px">Acerto histórico do sinal: ${a.statsOk ? pct0(a.bt.winRate) : 'amostra pequena'} · base ${pct0(a.bt.baseWinRate)}</div></div>
+            <div class="muted" style="font-size:12px">${a.trigger ? `Gatilho ativo${a.trigger === 'strong' ? ' (forte)' : ''}` : `Queda ${pct0(Math.abs(a.dd30))} · RSI ${a.rsi != null ? a.rsi.toFixed(0) : '—'}`} · nesta moeda: ${a.bt.events ? `${pct0(a.bt.winRate)} em ${a.bt.events} casos` : 'sem casos'}</div></div>
           <div class="score num" style="color:${scoreColor(a.score)}">${a.score}</div></div>
         <div class="score-bar"><i style="width:${a.score}%;background-position:${-300 + a.score * 3}px 0"></i></div>
         <p>${esc(a.summary)}</p>
@@ -326,11 +339,18 @@ function renderSettings() {
       ${customCoins().length ? `<div class="list" style="margin-top:12px">${customCoins().map(c => `<div class="row">${coinIcon(c)}<div class="meta"><div class="name">${c.sym}</div><div class="sub">adicionada por você</div></div><button class="del" data-rmcoin="${c.sym}" style="color:var(--down)">remover</button></div>`).join('')}</div>` : ''}
     </div>
     <div class="card method"><h3>🧠 Como o app decide</h3>
-      <p><b>1. Pontuação (0–100)</b> com 5 grupos de fatores: <b>Tendência</b> (médias de 50/200 dias), <b>Momentum</b> (retorno de 90 dias, MACD), <b>Ponto de entrada</b> (RSI e distância da média de 20 dias — comprar correções dentro de alta, não topos), <b>Volume</b> (fluxo comprador/OBV) e <b>Risco</b> (volatilidade e quedas extremas).</p>
-      <p><b>2. Prova no histórico (backtest).</b> A mesma regra é aplicada em ~1.000 dias de cada moeda. Medimos quantas vezes, ${PARAMS.horizon} dias depois de um sinal, o preço estava mais alto — já descontando taxas — e comparamos com um dia qualquer.</p>
-      <p><b>3. Alerta só se tudo bater:</b> pontuação ≥ ${PARAMS.threshold}, pelo menos ${PARAMS.minSignalDays} dias-sinal e ${PARAMS.minEvents} episódios independentes, acerto ≥ ${PARAMS.minWinRate * 100}%, vantagem ≥ ${PARAMS.minEdge * 100} p.p. sobre um dia aleatório e retorno mediano positivo. RSI acima de 72 bloqueia o alerta.</p>
-      <p><b>4. Simulação</b> usa a distribuição real dos resultados passados (pessimista = 10% piores casos, provável = mediana, otimista = 10% melhores).</p>
-      <p class="muted">Referências: Liu & Tsyvinski (2021, <i>Review of Financial Studies</i>) — momentum e atenção em cripto; Moskowitz, Ooi & Pedersen (2012) — time-series momentum; Jegadeesh (1990) — reversão de curto prazo; Brock, Lakonishok & LeBaron (1992) — médias móveis.</p>
+      <p><b>Estratégia: repique após queda forte.</b> O app avisa quando uma moeda caiu <b>25% ou mais</b> desde a máxima dos últimos 30 dias <b>e</b> o RSI(14) está <b>abaixo de 30</b> (vendedores esgotados). É uma operação de <b>curto prazo</b>: a ideia é comprar no pânico e reavaliar em cerca de ${PARAMS.horizon} dias. RSI abaixo de 25 = sinal <b>forte</b>.</p>
+      <p><b>Por que essa?</b> Testamos ~15 estratégias (a pontuação antiga, rompimentos, cruzamentos de médias, Bollinger, filtros pelo Bitcoin…) em ${STUDY.coins} moedas desde ${STUDY.from.slice(0, 4)}, separando um período de estudo (até 2022) e um de prova (2023+). Só esta teve vantagem nos dois períodos, em todas as variações de parâmetros e com estatística robusta.</p>
+      <div class="bt-row" style="margin:10px 0">
+        <div class="stat"><div class="k">Casos</div><div class="v num">${STUDY.events}</div><div class="s">${STUDY.coins} moedas</div></div>
+        <div class="stat"><div class="k">Subiram em ${PARAMS.horizon}d</div><div class="v num up">${pct0(STUDY.winRate)}</div><div class="s">dia qualquer: ${pct0(STUDY.baseWinRate)}</div></div>
+        <div class="stat"><div class="k">Sinal forte</div><div class="v num up">${pct0(STUDY.strongWinRate)}</div><div class="s">${STUDY.strongEvents} casos</div></div>
+      </div>
+      <p><b>Só alerta em pânico de mercado:</b> é preciso que pelo menos ${PARAMS.minBreadth * 100}% das moedas estejam no gatilho juntas. Quedas isoladas (provável notícia ruim da própria moeda) tiveram só ${pct0(STUDY.breadth.isolatedWinRate)} de acerto; em pânico geral, ${pct0(STUDY.breadth.panicWinRate)}.</p>
+      <p class="muted">⚠️ Em mercados de baixa prolongados (2018, 2022, 2026) o acerto ficou perto de 50%. Mediana do ganho em 7 dias é modesta e os 10% piores casos perdem 12–19%: use o stop e não concentre tudo.</p>
+      <p><b>Ano a ano</b> (acerto, todos os gatilhos): ${Object.entries(STUDY.byYear).map(([y, v]) => `<span class="${v.win >= STUDY.baseWinRate ? 'up' : 'down'}">${y}: ${pct0(v.win)}</span>`).join(' · ')}</p>
+      <p><b>Simulação</b> usa a distribuição real dos resultados (pessimista = 10% piores casos, provável = mediana, otimista = 10% melhores) da própria moeda, ou do estudo completo quando a moeda tem poucos casos.</p>
+      <p class="muted">Estudo reproduzível em <i>research/</i> no repositório. Base teórica: reversão de curto prazo (Jegadeesh 1990; Lehmann 1990) e sobre-reação em criptomoedas após quedas extremas.</p>
     </div>
     <div class="disclaimer">⚠️ <b>Importante:</b> estatística reduz o “chute”, mas não elimina o risco. Resultados passados não garantem resultados futuros e criptomoedas podem cair muito rápido. Use o app como apoio à decisão, invista só o que pode perder e considere o stop sugerido. Isto não é recomendação de investimento.</div>
     <p class="note" style="text-align:center">Dados: Binance (tempo real) e CoinGecko (máx./mín. histórica e ícones).</p>`;
@@ -411,11 +431,10 @@ function detailAnalysis(c, a) {
   const bt = a.bt;
   const groups = {};
   a.parts.forEach(p => { (groups[p.group] ||= []).push(p); });
-  const edgeTxt = a.edge != null ? `${a.edge >= 0 ? '+' : ''}${(a.edge * 100).toFixed(1).replace('.', ',')} p.p.` : '—';
-  return `
+    return `
     <div class="card">
       <div class="verdict">
-        <div class="ring"><canvas id="ring"></canvas><div class="val num" style="color:${scoreColor(a.score)}">${a.score}<small>de 100</small></div></div>
+        <div class="ring"><canvas id="ring"></canvas><div class="val num" style="color:${scoreColor(a.score)}">${a.score}<small>gatilho</small></div></div>
         <div><div class="verdict-title">${v.title}</div><div class="verdict-txt">${esc(a.summary)}</div></div>
       </div>
       <ul class="reasons">
@@ -424,19 +443,23 @@ function detailAnalysis(c, a) {
       </ul>
     </div>
 
-    <div class="card"><h3>📊 Prova estatística <span class="chip ${a.ruleWorks ? 'buy' : 'neutral'}">${a.ruleWorks ? 'REGRA VALIDADA' : 'NÃO VALIDADA'}</span></h3>
+    <div class="card"><h3>📊 Prova estatística</h3>
+      <div class="note" style="margin:0 0 8px">Estudo com ${STUDY.coins} moedas (${STUDY.events} casos, ${STUDY.from.slice(0, 4)}–${STUDY.to.slice(0, 4)})</div>
+      <div class="compare" style="margin-top:0">
+        <div class="lbl"><span>Subiram em ${PARAMS.horizon} dias após o gatilho</span><b class="up">${pct0(STUDY.winRate)}</b></div>
+        <div class="track"><i style="width:${STUDY.winRate * 100}%;background:var(--up)"></i></div>
+        <div class="lbl"><span>Após gatilho forte (RSI &lt; 25)</span><b class="up">${pct0(STUDY.strongWinRate)}</b></div>
+        <div class="track"><i style="width:${STUDY.strongWinRate * 100}%;background:linear-gradient(90deg,#1fbf87,var(--up))"></i></div>
+        <div class="lbl"><span>Comprando num dia qualquer</span><b>${pct0(STUDY.baseWinRate)}</b></div>
+        <div class="track"><i style="width:${STUDY.baseWinRate * 100}%;background:var(--muted)"></i></div>
+      </div>
+      <h3 style="margin:16px 0 10px;font-size:14px">Nesta moeda (${c.sym}) <span class="chip ${!bt.events ? 'neutral' : a.ruleWorks ? 'buy' : 'avoid'}">${!bt.events ? 'SEM CASOS' : bt.events < 5 ? 'POUCOS CASOS' : a.ruleWorks ? 'CONFIRMA' : 'FUNCIONOU POUCO'}</span></h3>
       <div class="bt-row">
-        <div class="stat"><div class="k">Episódios</div><div class="v num">${bt.events}</div><div class="s">${bt.signalDays} dias-sinal</div></div>
-        <div class="stat"><div class="k">Acerto ${bt.horizon}d</div><div class="v num ${bt.winRate >= PARAMS.minWinRate ? 'up' : 'down'}">${pct0(bt.winRate)}</div><div class="s">base ${pct0(bt.baseWinRate)}</div></div>
-        <div class="stat"><div class="k">Vantagem</div><div class="v num ${cls(a.edge ?? 0)}">${edgeTxt}</div><div class="s">${bt.pValue != null ? `p ≈ ${bt.pValue.toFixed(2).replace('.', ',')}` : ''}</div></div>
+        <div class="stat"><div class="k">Casos</div><div class="v num">${bt.events}</div></div>
+        <div class="stat"><div class="k">Acerto ${bt.horizon}d</div><div class="v num ${bt.winRate == null ? '' : bt.winRate >= bt.baseWinRate ? 'up' : 'down'}">${pct0(bt.winRate)}</div><div class="s">base ${pct0(bt.baseWinRate)}</div></div>
+        <div class="stat"><div class="k">Mediana</div><div class="v num ${cls(bt.medianRet ?? 0)}">${pct(bt.medianRet, 1)}</div><div class="s">base ${pct(bt.baseMedianRet, 1)}</div></div>
       </div>
-      <div class="compare">
-        <div class="lbl"><span>Retorno mediano após sinal</span><b class="${cls(bt.medianRet ?? 0)}">${pct(bt.medianRet, 1)}</b></div>
-        <div class="track"><i style="width:${Math.min(100, Math.max(3, 50 + (bt.medianRet ?? 0) * 250))}%;background:${(bt.medianRet ?? 0) >= 0 ? 'var(--up)' : 'var(--down)'}"></i></div>
-        <div class="lbl"><span>Retorno mediano de um dia qualquer</span><b class="${cls(bt.baseMedianRet ?? 0)}">${pct(bt.baseMedianRet, 1)}</b></div>
-        <div class="track"><i style="width:${Math.min(100, Math.max(3, 50 + (bt.baseMedianRet ?? 0) * 250))}%;background:var(--muted)"></i></div>
-      </div>
-      <p class="note">${esc(a.statsText)} Valores já descontam ${(PARAMS.costPct * 100).toFixed(1).replace('.', ',')}% de taxas. p-valor: probabilidade de a vantagem ser só sorte (quanto menor, melhor).</p>
+      <p class="note">${esc(a.statsText)} Valores já descontam ${(PARAMS.costPct * 100).toFixed(1).replace('.', ',')}% de taxas.</p>
     </div>
 
     <div class="card"><h3>💰 Simulação de compra</h3>
@@ -446,17 +469,17 @@ function detailAnalysis(c, a) {
       <button class="btn primary" id="simBuy">Simular compra agora</button>
     </div>
 
-    <div class="card"><h3>🔬 Raio-X dos fatores</h3>
+    <div class="card"><h3>🎯 Distância do gatilho</h3>
       ${Object.entries(groups).map(([g, ps]) => ps.map((p, i) => `
         <div class="factor"><div>${i === 0 ? `<div class="g">${g}</div>` : ''}${esc(p.text)}</div>
-          <div class="pts num" style="color:${p.pts < 0 ? 'var(--down)' : p.ok ? 'var(--up)' : p.pts > 0 ? 'var(--gold)' : 'var(--muted)'}">${p.pts > 0 ? '+' : ''}${p.pts}/${p.max}</div>
-          <div class="bar"><i style="width:${Math.max(0, p.pts) / p.max * 100}%;background:${p.ok ? 'var(--up)' : 'var(--gold)'}"></i></div></div>`).join('')).join('')}
+          <div class="pts num" style="color:${p.ok ? 'var(--up)' : 'var(--gold)'}">${p.max ? `${p.pts}/${p.max}` : p.ok ? '▲' : '▼'}</div>
+          ${p.max ? `<div class="bar"><i style="width:${Math.max(0, p.pts) / p.max * 100}%;background:${p.ok ? 'var(--up)' : 'var(--gold)'}"></i></div>` : ''}</div>`).join('')).join('')}
     </div>
 
     <div class="card"><h3>🛡️ Gestão de risco</h3>
       <div class="grid2">
         <div class="stat atl"><div class="k">Stop sugerido</div><div class="v num">${money(a.stop)}</div><div class="s">${pct(a.stop / a.price - 1, 1)} (2× ATR)</div></div>
-        <div class="stat ath"><div class="k">Alvo sugerido</div><div class="v num">${money(a.target)}</div><div class="s">${pct(a.target / a.price - 1, 1)} (3× ATR)</div></div>
+        <div class="stat ath"><div class="k">Alvo sugerido</div><div class="v num">${money(a.target)}</div><div class="s">${pct(a.target / a.price - 1, 1)} (2× ATR) · prazo ~${PARAMS.horizon} dias</div></div>
       </div>
       <p class="note">ATR = variação média diária (${pct0(a.atrPct)} ao dia). Stop é o ponto em que a tese de compra deixa de valer.</p>
     </div>`;
@@ -468,6 +491,7 @@ function parseAmount() {
   return isFinite(n) && n > 0 ? n : 0;
 }
 
+const quantileMid = d => { const s = [...d].sort((x, y) => x - y); return s[s.length >> 1]; };
 function updateSim() {
   const out = $('#simOut'); if (!out) return;
   const sym = S.detail, a = S.analysis[sym], p = price(sym);
@@ -489,7 +513,7 @@ function updateSim() {
   out.innerHTML = `
     <p style="margin:12px 0 0;font-size:14px">Você compraria <b class="num">≈ ${qty(q, sym)}</b> a <b class="num">${money(p)}</b></p>
     ${sim ? `
-      <div class="muted" style="font-size:12px;margin-top:12px">Resultado em ${sim.horizon} dias, com base em ${sim.dist.length} casos reais parecidos:</div>
+      <div class="muted" style="font-size:12px;margin-top:12px">Resultado em ${sim.horizon} dias após o gatilho, com base em ${sim.cases} casos reais ${sim.source === 'coin' ? `de ${sym}` : `de ${STUDY.coins} moedas`}:</div>
       <div class="scen">
         <div class="stat atl"><div class="k">Pessimista</div><div class="v num ${cls(sim.pessimistic - amount)}">${moneyLocal(sim.pessimistic)}</div><div class="s">${pct(sim.pessimistic / amount - 1, 1)}</div></div>
         <div class="stat"><div class="k">Provável</div><div class="v num ${cls(sim.median - amount)}">${moneyLocal(sim.median)}</div><div class="s">${pct(sim.median / amount - 1, 1)}</div></div>
@@ -500,7 +524,7 @@ function updateSim() {
       <p class="note">Lucro provável: <b class="${cls(sim.median - amount)}">${moneyLocal(sim.median - amount, true)}</b> · média esperada: ${moneyLocal(sim.expected - amount, true)}. Cada barra do gráfico mostra quantas vezes o resultado caiu naquela faixa.</p>`
       : '<p class="note">Ainda não há sinais suficientes no histórico desta moeda para simular resultados.</p>'}
     ${lastTxt}`;
-  if (sim) drawHistogram($('#hist'), sim.dist, a.bt.medianRet);
+  if (sim) drawHistogram($('#hist'), sim.dist, quantileMid(sim.dist));
 }
 
 async function loadRange() {
@@ -648,7 +672,8 @@ async function addCoin(sym) {
   try {
     const [d, h] = await Promise.all([fetchDaily(sym), fetchKlines(sym, '1h', 168).catch(() => null)]);
     S.daily[sym] = d; if (h) S.spark[sym] = h.map(k => k.c);
-    S.analysis[sym] = analyze(d);
+    S.analysis[sym] = analyze(d, PARAMS, STUDY);
+    applyBreadth(S.analysis, PARAMS, STUDY);
     Object.assign(S.tickers, await fetchTickers24h([c]).catch(() => ({})));
   } catch { toast(`Não consegui baixar os dados de ${sym}.`); }
   renderAll();

@@ -278,3 +278,13 @@ textarea.code { width: 100%; min-height: 110px; background: var(--bg2); color: #
 .alloc-legend span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .alloc-bar { height: 4px; border-radius: 2px; background: rgba(255,255,255,.07); margin-top: 6px; overflow: hidden; max-width: 140px; }
 .alloc-bar i { display: block; height: 100%; border-radius: 2px; }
+
+/* alertas de preço */
+.quick button.neg { color: var(--orange); }
+.al-ic { width: 40px; height: 40px; border-radius: 50%; flex: 0 0 40px; display: grid; place-items: center; font-size: 15px; font-weight: 800; }
+.al-ic.up { background: rgba(46,230,166,.15); color: var(--up); }
+.al-ic.down { background: rgba(255,159,90,.15); color: var(--orange); }
+.alert-row .name { font-size: 15px; }
+.alert-row.hit { background: linear-gradient(90deg, rgba(46,230,166,.12), transparent); }
+.al-prog { height: 4px; border-radius: 2px; background: rgba(255,255,255,.07); margin-top: 6px; overflow: hidden; max-width: 180px; }
+.al-prog i { display: block; height: 100%; border-radius: 2px; }

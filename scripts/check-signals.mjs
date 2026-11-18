@@ -6,6 +6,7 @@ import { COINS as BASE } from '../js/coins.js';
 import { analyze, applyBreadth, PARAMS } from '../js/analysis.js';
 import { STUDY } from '../js/study.js';
 import { firstHit, expandPos, exitMessage } from '../js/positions.js';
+import { alertHit, expandAlert, alertMessage } from '../js/alerts.js';
 import { VAPID_PUBLIC_KEY } from '../js/config.js';
 
 const BASES = ['https://data-api.binance.vision/api/v3', 'https://api.binance.com/api/v3'];
@@ -129,4 +130,27 @@ for (const sub of subs) {
   }
 }
 console.log(`Compras simuladas verificadas: ${posCount}.`);
+
+// ---------------------------------------------------------------------------
+// Alertas de preço manuais
+// ---------------------------------------------------------------------------
+const fmtUsd = v => `US$ ${v >= 1 ? v.toLocaleString('pt-BR', { maximumFractionDigits: 2 }) : v.toLocaleString('pt-BR', { maximumSignificantDigits: 4 })}`;
+let alCount = 0;
+for (const sub of subs) {
+  for (const raw of sub.radar?.al || []) {
+    const a = expandAlert(raw); alCount++;
+    if (state[`al:${a.id}`]) continue;
+    try {
+      const ks = await klines(a.sym, '1h', `&startTime=${a.at - 36e5}`);
+      if (!alertHit(a, ks)) continue;
+      const name = COINS.find(c => c.sym === a.sym)?.name || a.sym;
+      const msg = alertMessage(a, name, fmtUsd(a.price));
+      console.log(`Alerta de preço ${a.sym} ${a.dir} ${a.price}: atingido`);
+      if (!VAPID_PRIVATE_KEY) continue;
+      await webpush.sendNotification({ endpoint: sub.endpoint, keys: sub.keys }, JSON.stringify({ ...msg, url: `${SITE}?coin=${a.sym}`, tag: `al-${a.id}` }), { TTL: 12 * 3600, urgency: 'high' });
+      state[`al:${a.id}`] = now;
+    } catch (e) { console.error(`Alerta de preço ${a.sym}: erro ${e.statusCode || e.message}`); }
+  }
+}
+console.log(`Alertas de preço verificados: ${alCount}.`);
 saveState(state);

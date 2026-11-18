@@ -38,8 +38,8 @@ export class PriceChart {
     this._ro.observe(canvas);
   }
 
-  setData(candles, { markers = [], ath = null, animate = true } = {}) {
-    this.data = candles; this.markers = markers; this.ath = ath;
+  setData(candles, { markers = [], ath = null, lines = [], animate = true } = {}) {
+    this.data = candles; this.markers = markers; this.ath = ath; this.lines = lines;
     if (animate) {
       const start = performance.now();
       const step = now => {
@@ -89,6 +89,10 @@ export class PriceChart {
       if (k.c > max) { max = k.c; iMax = i; }
       if (k.v > vMax) vMax = k.v;
     });
+    // linhas de alerta próximas (até 25% do preço atual) entram na escala para ficarem visíveis
+    const lastC = d[d.length - 1].c;
+    const lines = (this.lines || []).filter(l => Math.abs(l.price / lastC - 1) < 0.25);
+    for (const l of lines) { min = Math.min(min, l.price); max = Math.max(max, l.price); }
     const span = (max - min) || max * 0.01;
     const lo = min - span * 0.08, hi = max + span * 0.08;
     this.stepX = (w - pad.l - pad.r) / (d.length - 1);
@@ -118,6 +122,17 @@ export class PriceChart {
       ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke(); ctx.setLineDash([]);
       ctx.fillStyle = '#FFD166'; ctx.font = '600 10px -apple-system, system-ui';
       ctx.fillText('MÁX. HISTÓRICA', 8, y - 4);
+    }
+
+    // linhas de alerta de preço
+    for (const l of lines) {
+      const y = Y(l.price);
+      ctx.setLineDash([6, 5]); ctx.strokeStyle = hexA(l.color, 0.85); ctx.lineWidth = 1.4;
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke(); ctx.setLineDash([]);
+      ctx.font = '700 10px -apple-system, system-ui';
+      const txt = l.label; const tw = ctx.measureText(txt).width;
+      ctx.fillStyle = hexA(l.color, 0.2); ctx.fillRect(w - tw - 14, y - 9, tw + 10, 16);
+      ctx.fillStyle = l.color; ctx.fillText(txt, w - tw - 9, y + 3);
     }
 
     // área com degradê

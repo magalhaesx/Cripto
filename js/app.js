@@ -2,6 +2,7 @@ import { COINS as BASE_COINS, colorFor } from './coins.js';
 import { analyze, simulate, applyBreadth, PARAMS } from './analysis.js';
 import { STUDY } from './study.js';
 import { firstHit, compactPos, exitMessage } from './positions.js';
+import { alertHit, compactAlert, alertMessage } from './alerts.js';
 import { fetchDaily, fetchKlines, fetchTickers24h, fetchUsdBrl, fetchMarkets, connectLive, fetchAllUsdtSymbols, RANGES } from './api.js';
 import { PriceChart, drawSpark, drawHistogram, drawScoreRing, drawDonut, scoreColor } from './chart.js';
 import { VAPID_PUBLIC_KEY } from './config.js';
@@ -29,6 +30,7 @@ const S = {
   tickers: {}, daily: {}, analysis: {}, markets: {}, spark: {},
   amount: store.get('amount', 1000),
   positions: store.get('positions', []),
+  alerts: store.get('priceAlerts', []),   // alertas de preço manuais
   wallet: store.get('wallet', null),       // { initialUsd, cashUsd, createdAt }
   hourly: {}, walletRange: '7D',
   notified: store.get('notified', {}),
@@ -246,6 +248,7 @@ function renderHome(soft) {
         <div class="opp-txt">${esc(a.reasons.slice(0, 2).join(' · ') || a.summary)}</div>
       </button>`).join('')}</div>`
       : `<div class="empty"><b>Mercado sem sinais fortes.</b> Fique tranquilo: você será notificado quando uma moeda ficar boa para compra.</div>`}
+    ${alertsHomeSection()}
     <h2 class="section">⭐ Favoritas <small class="muted">${S.favs.length ? 'toque na ★ para remover' : ''}</small></h2>
     ${S.favs.length ? `<div class="list">${S.favs.filter(f => coinBySym[f]).map(f => coinRow(coinBySym[f])).join('')}</div>`
       : '<div class="empty">Toque na <b>☆</b> ao lado de qualquer moeda para fixá-la aqui. Você também pode escolher receber notificações só das favoritas em Ajustes.</div>'}
@@ -571,7 +574,7 @@ function renderSettings() {
       <div class="set-row"><div><b>Quais moedas notificar?</b><div class="note" style="margin:2px 0 0">${S.notifyMode === 'favorites' ? `Só as ${S.favs.length} favoritas` : `Todas as ${COINS.length} moedas`}</div></div></div>
       <div class="seg"><button data-notify="all" class="${S.notifyMode === 'all' ? 'on' : ''}">Todas</button><button data-notify="favorites" class="${S.notifyMode === 'favorites' ? 'on' : ''}">★ Só favoritas</button></div>
       ${pushCfgStale()
-        ? '<div class="err" style="background:rgba(255,209,102,.12);color:var(--gold)">⚠️ Você mudou favoritas, moedas, compras simuladas ou o tipo de notificação. Gere e copie o código de novo e atualize o segredo <b>PUSH_SUBSCRIPTIONS</b> no GitHub para o robô saber.</div>' : ''}
+        ? '<div class="err" style="background:rgba(255,209,102,.12);color:var(--gold)">⚠️ Você mudou favoritas, moedas, compras simuladas, alertas de preço ou o tipo de notificação. Gere e copie o código de novo e atualize o segredo <b>PUSH_SUBSCRIPTIONS</b> no GitHub para o robô saber.</div>' : ''}
       <button class="btn primary" id="enablePush">${perm === 'granted' ? 'Gerar código do aparelho' : 'Ativar notificações'}</button>
       <div id="pushOut"></div>
       <button class="btn ghost" id="testNotif">Enviar notificação de teste</button>
@@ -670,6 +673,112 @@ function renderDetail() {
   if (a?.ok) { drawScoreRing($('#ring'), a.score); updateSim(); }
 }
 
+// ---------------------------------------------------------------------------
+// Alertas de preço manuais
+// ---------------------------------------------------------------------------
+const saveAlerts = () => store.set('priceAlerts', S.alerts);
+const fmtLocal = usd => money(usd);
+
+function chartAlertLines(sym) {
+  return S.alerts.filter(a => a.sym === sym && !a.hitAt).map(a => ({ price: a.price, color: a.dir === 'above' ? '#2EE6A6' : '#FF9F5A', label: `🔔 ${money(a.price)}` }));
+}
+
+function alertsCard(c) {
+  const list = S.alerts.filter(a => a.sym === c.sym);
+  const p = price(c.sym);
+  return `<div class="card" id="alertsCard"><h3>🔔 Alertas de preço ${list.filter(a => !a.hitAt).length ? `<span class="chip watch">${list.filter(a => !a.hitAt).length} ativo${list.filter(a => !a.hitAt).length > 1 ? 's' : ''}</span>` : ''}</h3>
+    <p class="note" style="margin-top:0">Você recebe uma notificação quando ${c.sym} chegar no preço escolhido.</p>
+    <div class="amount" style="padding:2px 12px"><span>${curSym()}</span><input id="alertPrice" inputmode="decimal" placeholder="${p ? fmtNum(conv(p)) : 'preço'}" style="font-size:22px"></div>
+    <div class="quick">${[-10, -5, 5, 10].map(q => `<button data-alq="${q}" class="${q < 0 ? 'neg' : ''}">${q > 0 ? '+' : ''}${q}%</button>`).join('')}</div>
+    <div id="alertHint" class="note"></div>
+    <button class="btn primary" id="addAlert" style="margin-top:8px">Criar alerta</button>
+    ${list.length ? `<div class="list" style="margin-top:12px">${list.map(a => alertRow(a, false)).join('')}</div>` : ''}
+  </div>`;
+}
+
+function alertRow(a, withCoin) {
+  const c = coinBySym[a.sym] || { sym: a.sym, name: a.sym, color: colorFor(a.sym) };
+  const p = price(a.sym);
+  const dist = p ? a.price / p - 1 : null;
+  const up = a.dir === 'above';
+  return `<div class="row alert-row${a.hitAt ? ' hit' : ''}">
+    ${withCoin ? coinIcon(c) : `<div class="al-ic ${up ? 'up' : 'down'}">${up ? '▲' : '▼'}</div>`}
+    <div class="meta"${withCoin ? ` data-open="${a.sym}"` : ''}><div class="name">${withCoin ? `${a.sym} ` : ''}${up ? 'Subir até' : 'Cair até'} ${money(a.price)}</div>
+      <div class="sub">${a.hitAt ? `✅ Atingido em ${fmtDateTime(a.hitAt, '7D')}` : dist != null ? `faltam ${pct(Math.abs(dist), 1).replace(/^[+−]/, '')} · criado ${fmtDate(a.at)}` : ''}</div>
+      ${!a.hitAt && dist != null ? `<div class="al-prog"><i style="width:${Math.max(4, 100 - Math.min(100, Math.abs(dist) / Math.max(1e-9, Math.abs(a.price / a.ref - 1)) * 100))}%;background:${up ? 'var(--up)' : 'var(--orange)'}"></i></div>` : ''}</div>
+    <button class="del" data-delalert="${a.id}">${a.hitAt ? 'apagar' : 'remover'}</button>
+  </div>`;
+}
+
+function alertsHomeSection() {
+  if (!S.alerts.length) return '';
+  const act = S.alerts.filter(a => !a.hitAt), hit = S.alerts.filter(a => a.hitAt);
+  return `<h2 class="section">🔔 Alertas de preço <small class="muted">${act.length} ativo${act.length === 1 ? '' : 's'}</small></h2>
+    <div class="list">${[...hit, ...act].map(a => alertRow(a, true)).join('')}</div>`;
+}
+
+const fmtNum = v => v >= 1 ? v.toLocaleString('pt-BR', { maximumFractionDigits: 2 }) : v.toLocaleString('pt-BR', { maximumSignificantDigits: 4 });
+function parseLocalPrice(str) {
+  const t = String(str).trim(); if (!t) return null;
+  // aceita "1.234,56", "1234,56", "0,0000123" e "1234.56"
+  const n = /,/.test(t) || /^\d{1,3}(\.\d{3})+$/.test(t) ? parseFloat(t.replace(/\./g, '').replace(',', '.')) : parseFloat(t);
+  return n > 0 ? n : null;
+}
+function alertHint() {
+  const el = $('#alertHint'); if (!el) return;
+  const v = parseLocalPrice($('#alertPrice').value), p = price(S.detail);
+  if (!v || !p) { el.textContent = ''; return; }
+  const usd = S.cur === 'BRL' && S.rate ? v / S.rate : v;
+  const d = usd / p - 1;
+  el.innerHTML = Math.abs(d) < 0.0005 ? 'Esse é praticamente o preço atual.'
+    : `Avisar quando <b class="${d > 0 ? 'up' : 'down'}">${d > 0 ? 'SUBIR' : 'CAIR'}</b> ${pct(Math.abs(d), 1).replace(/^[+−]/, '')} até ${money(usd)}.`;
+}
+function addAlert() {
+  const sym = S.detail, p = price(sym);
+  const v = parseLocalPrice($('#alertPrice').value);
+  if (!v || !p) return toast('Digite um preço válido.');
+  const usd = S.cur === 'BRL' && S.rate ? v / S.rate : v;
+  if (Math.abs(usd / p - 1) < 0.0005) return toast('Escolha um preço diferente do atual.');
+  const a = { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 5), sym, price: usd, dir: usd > p ? 'above' : 'below', at: Date.now(), ref: p };
+  S.alerts.push(a); saveAlerts();
+  toast(`🔔 Alerta criado: avisar quando ${sym} ${a.dir === 'above' ? 'subir' : 'cair'} até ${money(usd)}.${S.pushCfg ? '<br><span class="muted">Atualize o código do aparelho no GitHub para receber com o app fechado.</span>' : ''}`);
+  refreshAlertUI();
+  if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
+}
+function refreshAlertUI() {
+  const card = $('#alertsCard'); if (card && S.detail) card.outerHTML = alertsCard(coinBySym[S.detail]);
+  if (S.rangeData && S.detail) setChartData(false);
+  renderHome(true);
+}
+
+async function fireAlert(a, priceUsd) {
+  if (a.hitAt) return;
+  a.hitAt = Date.now(); saveAlerts();
+  const c = coinBySym[a.sym];
+  const { title, body } = alertMessage(a, c?.name || a.sym, money(a.price));
+  toast(`<b>${esc(title)}</b><br><span class="muted">${esc(body)} Agora: ${money(priceUsd)}.</span>`, () => openDetail(a.sym));
+  navigator.vibrate?.([40, 60, 40]);
+  if ('Notification' in window && Notification.permission === 'granted') {
+    const reg = await navigator.serviceWorker?.getRegistration();
+    reg?.showNotification(title, { body, icon: 'icons/icon-192.png', badge: 'icons/icon-192.png', tag: `al-${a.id}`, data: { url: `./?coin=${a.sym}` } });
+  }
+  refreshAlertUI();
+}
+let lastAlCheck = 0;
+function checkAlertsLive() {
+  if (Date.now() - lastAlCheck < 1000) return; lastAlCheck = Date.now();
+  for (const a of S.alerts) {
+    if (a.hitAt) continue;
+    const p = S.tickers[a.sym]?.price; if (!p) continue;
+    if (a.dir === 'above' ? p >= a.price : p <= a.price) fireAlert(a, p);
+  }
+}
+async function reconcileAlerts() {
+  for (const a of S.alerts.filter(a => !a.hitAt)) {
+    try { const ks = await fetchKlines(a.sym, '1h', 1000, a.at - 36e5); const h = alertHit(a, ks); if (h) fireAlert(a, ks.at(-1).c); } catch {}
+  }
+}
+
 function holdingCard(c) {
   const lots = S.positions.filter(p => p.sym === c.sym && p.status !== 'sold');
   if (!lots.length) return '';
@@ -721,6 +830,7 @@ function detailAnalysis(c, a) {
       <p class="note">${esc(a.statsText)} Valores já descontam ${(PARAMS.costPct * 100).toFixed(1).replace('.', ',')}% de taxas.</p>
     </div>
 
+    ${alertsCard(c)}
     ${holdingCard(c)}
     <div class="card"><h3>💰 Simulação de compra <span class="chip neutral">saldo ${S.wallet ? money(S.wallet.cashUsd) : '—'}</span></h3>
       <div class="amount"><span>${curSym()}</span><input id="amt" inputmode="decimal" value="${String(S.amount).replace('.', ',')}"></div>
@@ -806,7 +916,7 @@ function setChartData(animate) {
   const a = S.analysis[sym];
   const x = athAtl(coinBySym[sym]);
   const markers = ['1A', 'TUDO', '1M'].includes(S.range) && a?.ok ? a.signalTimes : [];
-  S.chart?.setData(data, { markers, ath: x?.ath, animate });
+  S.chart?.setData(data, { markers, ath: x?.ath, animate, lines: chartAlertLines(sym) });
   updateDetailLive(true);
 }
 
@@ -858,6 +968,7 @@ function flush() {
   }
   pending.clear();
   checkPositions();
+  checkAlertsLive();
   if (S.view === 'sim' && S.positions.length) renderSim(true);
 }
 
@@ -898,7 +1009,8 @@ function renderSettingsKeepOut() { /* mantém a mensagem de erro visível */ }
 const pushCfgStale = () => !!S.pushCfg && S.pushCfg !== JSON.stringify(radarCfg());
 function radarCfg() {
   return { notify: S.notifyMode, favs: [...S.favs].sort(), extra: customCoins().map(c => c.sym).sort(),
-    pos: S.positions.filter(p => p.status === 'open').map(compactPos) };
+    pos: S.positions.filter(p => p.status === 'open').map(compactPos),
+    al: S.alerts.filter(a => !a.hitAt).map(compactAlert) };
 }
 
 // ---------------------------------------------------------------------------
@@ -976,6 +1088,11 @@ function switchView(v) {
 
 document.addEventListener('click', e => {
   const tab = e.target.closest('.tab'); if (tab) return switchView(tab.dataset.view);
+  if (e.target.closest('#addAlert')) return addAlert();
+  const alq = e.target.closest('[data-alq]');
+  if (alq) { const p = price(S.detail); if (p) { $('#alertPrice').value = fmtNum(conv(p * (1 + alq.dataset.alq / 100))); alertHint(); } return; }
+  const da = e.target.closest('[data-delalert]');
+  if (da) { S.alerts = S.alerts.filter(a => a.id !== da.dataset.delalert); saveAlerts(); refreshAlertUI(); return; }
   const dp = e.target.closest('[data-delpos]');
   if (dp) {
     const p = S.positions.find(x => x.id === dp.dataset.delpos);
@@ -1058,6 +1175,7 @@ document.addEventListener('change', e => {
 
 document.addEventListener('input', e => {
   if (e.target.id === 'coinSearch') return searchCoins(e.target.value);
+  if (e.target.id === 'alertPrice') return alertHint();
   if (e.target.id === 'amt') { S.amount = parseAmount(); store.set('amount', S.amount); updateSim(); }
 });
 
@@ -1087,7 +1205,7 @@ function startLive() {
 }
 startLive();
 loadAll().then(() => {
-  migratePositions(); initWallet(); reconcilePositions(); renderSim();
+  migratePositions(); initWallet(); reconcilePositions(); reconcileAlerts(); renderSim();
   if (new URLSearchParams(location.search).get('tab') === 'sim') switchView('sim');
   const q = new URLSearchParams(location.search).get('coin');
   if (q && coinBySym[q]) openDetail(q);

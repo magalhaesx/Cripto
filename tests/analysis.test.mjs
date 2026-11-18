@@ -67,3 +67,15 @@ test('posição compacta ida e volta', () => {
   const p = { id: 'x', sym: 'BTC', entry: 100, stop: 90, target: 110, at: 1, exp: 2 };
   assert.deepEqual(expandPos(compactPos(p)), p);
 });
+
+import { alertHit, compactAlert, expandAlert } from '../js/alerts.js';
+test('alerta de preço: acima e abaixo', () => {
+  const k = (t, l, h) => ({ t, l, h, c: h });
+  const up = { id: 'a', sym: 'BTC', price: 110, dir: 'above', at: 0 };
+  const dn = { ...up, price: 90, dir: 'below' };
+  assert.ok(alertHit(up, [k(0, 95, 105), k(36e5, 100, 111)]));
+  assert.equal(alertHit(up, [k(0, 80, 105)]), null);
+  assert.ok(alertHit(dn, [k(0, 89, 105)]));
+  assert.equal(alertHit({ ...dn, at: 72e5 }, [k(0, 50, 100), k(72e5, 95, 100)]), null);
+  assert.deepEqual(expandAlert(compactAlert(up)), up);
+});

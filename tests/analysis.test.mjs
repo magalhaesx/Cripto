@@ -88,3 +88,15 @@ test('clima: alta, correção e baixa longa', () => {
   assert.equal(marketRegime(mk(i => 500 - i)).state, 'bear');
   assert.equal(marketRegime(mk(i => 100).slice(0, 100)), null);
 });
+
+import { evaluateOutcome } from '../js/analysis.js';
+test('resultado de um alerta: alvo, stop e prazo', () => {
+  const k = (h, l, c) => ({ t: 0, o: c, h, l, c, v: 1 });
+  const cs = [k(100, 100, 100), k(101, 99, 100), k(115, 99, 112), k(112, 110, 111)];
+  const ind = { c: cs.map(x => x.c), atrPct: [0.05, 0.05, 0.05, 0.05] };
+  const r = evaluateOutcome(ind, cs, 0, { horizon: 3, costPct: 0 });
+  assert.equal(r.exit, 'target'); assert.ok(Math.abs(r.retST - 0.10) < 1e-9);
+  const cs2 = [k(100, 100, 100), k(100, 85, 88)];
+  const r2 = evaluateOutcome({ c: [100, 88], atrPct: [0.05, 0.05] }, cs2, 0, { horizon: 3, costPct: 0 });
+  assert.equal(r2.exit, 'stop'); assert.equal(r2.done, false);
+});

@@ -400,3 +400,55 @@ export function simulate(amount, analysis) {
     dist,
   };
 }
+
+// ---------- histórico de alertas (o que a regra atual teria avisado) -----------
+// Resultado de uma compra no índice i: retorno ao fim do prazo e com stop/alvo (2× ATR).
+export function evaluateOutcome(ind, candles, i, P = PARAMS) {
+  const entry = ind.c[i], atr = ind.atrPct[i] ?? 0.05;
+  const stop = entry * (1 - 2 * atr), target = entry * (1 + 2 * atr);
+  const last = Math.min(candles.length - 1, i + P.horizon);
+  let exit = null;
+  for (let j = i + 1; j <= last; j++) {
+    if (candles[j].l <= stop) { exit = { type: 'stop', price: stop, j }; break; }
+    if (candles[j].h >= target) { exit = { type: 'target', price: target, j }; break; }
+  }
+  const done = i + P.horizon < candles.length;
+  const endPrice = candles[last].c;
+  if (!exit) exit = { type: done ? 'time' : 'open', price: endPrice, j: last };
+  return {
+    entry, done, ret: endPrice / entry - 1 - P.costPct,                // vendendo no fim do prazo (ou hoje, se em andamento)
+    retST: exit.price / entry - 1 - P.costPct, exit: exit.type,       // respeitando stop/alvo
+    days: exit.j - i, stop, target,
+  };
+}
+
+// dailyBySym: { SYM: candles diárias }. Retorna os alertas que a regra completa (gatilho + pânico + clima) teria dado.
+export function historicalAlerts(dailyBySym, P = PARAMS) {
+  const coins = Object.entries(dailyBySym).filter(([, cs]) => cs?.length >= 60)
+    .map(([sym, cs]) => ({ sym, cs, ind: computeIndicators(cs) }));
+  const trig = {}, active = {};
+  for (const { cs, ind } of coins) for (let i = 30; i < cs.length; i++) {
+    active[cs[i].t] = (active[cs[i].t] || 0) + 1;
+    if (isTrigger(ind, i, P)) trig[cs[i].t] = (trig[cs[i].t] || 0) + 1;
+  }
+  const btc = coins.find(c => c.sym === 'BTC');
+  const regimeAt = new Map();
+  if (btc) {
+    const ma = btc.ind.sma200, c = btc.ind.c;
+    for (let i = 200 + P.regimeSlopeDays; i < c.length; i++)
+      regimeAt.set(btc.cs[i].t, c[i] > ma[i] ? 'bull' : ma[i] < ma[i - P.regimeSlopeDays] ? 'bear' : 'correction');
+  }
+  const out = [];
+  for (const { sym, cs, ind } of coins) {
+    let last = -Infinity;
+    for (let i = 30; i < cs.length; i++) {
+      const g = isTrigger(ind, i, P);
+      if (!g || i - last < P.horizon) continue;
+      const t = cs[i].t, share = trig[t] / active[t], regime = regimeAt.get(t);
+      if (share < P.minBreadth || !regime || regime === 'bear') continue;
+      last = i;
+      out.push({ t, sym, strong: g === 'strong', regime, share, ...evaluateOutcome(ind, cs, i, P) });
+    }
+  }
+  return out.sort((a, b) => b.t - a.t);
+}

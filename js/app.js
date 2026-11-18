@@ -1,11 +1,11 @@
 import { COINS as BASE_COINS, colorFor } from './coins.js';
-import { analyze, simulate, applyBreadth, marketRegime, PARAMS } from './analysis.js';
+import { analyze, simulate, applyBreadth, marketRegime, historicalAlerts, PARAMS } from './analysis.js';
 import { STUDY } from './study.js';
 import { firstHit, compactPos, exitMessage } from './positions.js';
 import { alertHit, compactAlert, alertMessage } from './alerts.js';
 import { fetchDaily, fetchKlines, fetchTickers24h, fetchUsdBrl, fetchMarkets, connectLive, fetchAllUsdtSymbols, fetchFearGreed, RANGES } from './api.js';
 import { PriceChart, drawSpark, drawHistogram, drawScoreRing, drawDonut, drawGauge, drawFngBars, scoreColor } from './chart.js';
-import { VAPID_PUBLIC_KEY } from './config.js';
+import { VAPID_PUBLIC_KEY, ALERT_LOG_URL, REPO } from './config.js';
 
 // ---------------------------------------------------------------------------
 // Estado
@@ -111,6 +111,7 @@ async function loadAll() {
   }));
   const failed = results.filter(r => r.status === 'rejected').length;
   S.regime = marketRegime(S.daily.BTC); applyBreadth(S.analysis, PARAMS, STUDY, S.regime);
+  S.dailyStamp = Date.now();
   if (failed === COINS.length) S.error = 'Não foi possível baixar os dados de mercado. Verifique a internet e toque em atualizar.';
   S.loading = false;
   $('#refreshBtn').classList.remove('spin');
@@ -311,11 +312,120 @@ function drawSparks() {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Histórico de alertas: registro oficial (ao vivo) + simulação no histórico
+// ---------------------------------------------------------------------------
+async function loadAlertLog(force) {
+  if (!force && S.alertLog && Date.now() - S.alertLogAt < 5 * 60e3) return;
+  try {
+    const r = await fetch(`${ALERT_LOG_URL}?t=${Math.floor(Date.now() / 60e3)}`);
+    S.alertLog = r.ok ? await r.json() : [];
+  } catch { S.alertLog = S.alertLog || null; }
+  S.alertLogAt = Date.now();
+  if (S.view === 'signals' && S.sigTab === 'hist') renderSignals();
+}
+
+// resultado de um registro ao vivo: preço 7 dias depois (ou agora, se ainda dentro do prazo)
+function liveOutcome(e) {
+  const end = e.t + PARAMS.horizon * 864e5, d = S.daily[e.sym];
+  let px, done = Date.now() >= end, best = e.price;
+  if (d) for (const k of d) { if (k.t + 864e5 > e.t && k.t <= end) best = Math.max(best, k.h); }
+  if (done && d) { const k = d.find(k => k.t <= end && end < k.t + 864e5) || d.findLast?.(k => k.t <= end); px = k?.c; }
+  else px = price(e.sym);
+  if (!px) return null;
+  return { ret: px / e.price - 1 - PARAMS.costPct, done, best: best / e.price - 1, daysLeft: Math.max(0, Math.ceil((end - Date.now()) / 864e5)) };
+}
+
+const REG_IC = { bull: '🐂', correction: '🔄', bear: '🐻' };
+function dayGroups(items) {
+  const g = new Map();
+  for (const x of items) { const k = new Date(x.t).toISOString().slice(0, 10); (g.get(k) || g.set(k, []).get(k)).push(x); }
+  return [...g.entries()];
+}
+const EXIT_IC = { target: '🎯', stop: '🛑', time: '⏰' };
+const resChip = (sym, r, done, exit) => `<span class="res-chip ${!done ? 'open' : r >= 0 ? 'pos' : 'neg'}" data-open="${sym}">${exit ? `${EXIT_IC[exit] || ''} ` : ''}${sym} <b>${pct(r, 1)}</b></span>`;
+
+function renderHistory(el, tabs) {
+  if (S.alertLog === undefined) loadAlertLog();
+  const mode = S.histMode || 'time';
+  // simulação (recalculada quando os dados diários mudam)
+  if (!S.hist || S.hist.stamp !== S.dailyStamp) S.hist = { stamp: S.dailyStamp, list: historicalAlerts(S.daily, PARAMS) };
+  const H = S.hist.list, done = H.filter(x => x.done);
+  const r = x => (mode === 'st' ? x.retST : x.ret);
+  const winH = done.length ? done.filter(x => r(x) > 0).length / done.length : null;
+  const avgH = done.length ? done.reduce((a, x) => a + r(x), 0) / done.length : null;
+  const unitUsd = S.cur === 'BRL' && S.rate ? 1000 / S.rate : 1000;   // R$ 1.000 (ou US$ 1.000) por alerta
+  const profitH = done.reduce((a, x) => a + r(x) * unitUsd, 0);
+  const firstT = H.length ? H[H.length - 1].t : null;
+
+  // registro ao vivo
+  const log = (S.alertLog || []).slice().sort((a, b) => b.t - a.t).map(e => ({ ...e, out: liveOutcome(e) }));
+  const ld = log.filter(e => e.out?.done);
+  const winL = ld.length ? ld.filter(e => e.out.ret > 0).length / ld.length : null;
+  const avgL = ld.length ? ld.reduce((a, e) => a + e.out.ret, 0) / ld.length : null;
+
+  el.innerHTML = `${tabs}
+    <div class="card proof">
+      <h3>📒 Registro oficial <span class="chip buy">AO VIVO</span></h3>
+      <p class="note" style="margin-top:0">Cada alerta é gravado pelo robô <b>no momento em que dispara</b>, com data e preço, num arquivo público do repositório (<a href="https://github.com/${REPO}/commits/main/data/alerts-log.json" target="_blank" rel="noopener">histórico no GitHub</a>). Não dá para apagar ou editar sem deixar rastro.</p>
+      ${S.alertLog === undefined ? '<div class="skeleton" style="height:60px"></div>'
+        : S.alertLog === null ? '<div class="err">Não foi possível ler o registro agora.</div>'
+        : !log.length ? '<div class="empty">Ainda sem alertas registrados. O registro começa a partir da próxima rodada do robô (a cada 30 min).</div>'
+        : `<div class="bt-row">
+            <div class="stat"><div class="k">Alertas</div><div class="v num">${log.length}</div><div class="s">${ld.length} concluídos</div></div>
+            <div class="stat"><div class="k">Com lucro</div><div class="v num ${winL == null ? '' : winL >= 0.5 ? 'up' : 'down'}">${winL == null ? '—' : pct0(winL)}</div><div class="s">em ${PARAMS.horizon} dias</div></div>
+            <div class="stat"><div class="k">Média</div><div class="v num ${avgL == null ? '' : cls(avgL)}">${avgL == null ? '—' : pct(avgL, 1)}</div><div class="s">por alerta</div></div>
+          </div>
+          <div class="days">${dayGroups(log).map(([day, es]) => `<div class="day">
+            <div class="day-h"><b>${fmtDate(es[0].t)}</b><span class="muted">${REG_IC[es[0].regime] || ''} ${es[0].fng != null ? `medo ${es[0].fng}` : ''} · ${es.length} alerta${es.length > 1 ? 's' : ''}</span></div>
+            <div class="chips">${es.map(e => e.out ? resChip(e.sym, e.out.ret, e.out.done) : `<span class="res-chip open">${e.sym}</span>`).join('')}</div>
+            ${es.some(e => e.out && !e.out.done) ? `<div class="muted small">Em andamento — resultado final em ${Math.max(...es.map(e => e.out?.daysLeft || 0))} dia(s). Cinza = parcial (preço de agora).</div>` : ''}
+          </div>`).join('')}</div>`}
+    </div>
+
+    <div class="card proof">
+      <h3>🧪 Simulação no histórico <span class="chip neutral">${firstT ? `desde ${new Date(firstT).getFullYear()}` : ''}</span></h3>
+      <p class="note" style="margin-top:0">Todos os alertas que a regra atual teria dado com os dados diários disponíveis (${done.length} já concluídos), comprando no fechamento do dia do alerta.</p>
+      <div class="seg mini" style="margin-bottom:12px"><button data-hmode="time" class="${mode === 'time' ? 'on' : ''}">Vender em ${PARAMS.horizon} dias</button><button data-hmode="st" class="${mode === 'st' ? 'on' : ''}">Usar stop e alvo</button></div>
+      <div class="bt-row">
+        <div class="stat"><div class="k">Com lucro</div><div class="v num ${winH >= 0.5 ? 'up' : 'down'}">${winH == null ? '—' : pct0(winH)}</div><div class="s">${done.length} alertas</div></div>
+        <div class="stat"><div class="k">Média</div><div class="v num ${cls(avgH ?? 0)}">${avgH == null ? '—' : pct(avgH, 1)}</div><div class="s">por alerta</div></div>
+        <div class="stat ${profitH >= 0 ? 'ath' : 'atl'}"><div class="k">${curSym()} 1.000 cada</div><div class="v num ${cls(profitH)}">${money(profitH, { sign: true, compact: true })}</div><div class="s">lucro somado</div></div>
+      </div>
+      <div class="wallet-chart-val num" id="hHover" style="padding:10px 0 0"></div>
+      <canvas id="histChart" class="wallet-chart" style="height:170px"></canvas>
+      <div class="legend"><span>Lucro acumulado investindo ${curSym()} 1.000 em cada alerta</span>${mode === 'st' ? '<span>🎯 alvo · 🛑 stop · ⏰ prazo</span>' : ''}</div>
+      <h2 class="section" style="margin-top:16px">Alertas por dia</h2>
+      <div class="days">${dayGroups(H).slice(0, S.histMore ? 999 : 12).map(([day, es]) => {
+        const dd = es.filter(e => e.done), avg = dd.length ? dd.reduce((a, e) => a + r(e), 0) / dd.length : null;
+        return `<div class="day">
+          <div class="day-h"><b>${fmtDate(es[0].t)}</b><span class="muted">${REG_IC[es[0].regime] || ''} pânico ${pct0(es[0].share)}${avg != null ? ` · média <b class="${cls(avg)}">${pct(avg, 1)}</b>` : ' · em andamento'}</span></div>
+          <div class="chips">${es.map(e => resChip(e.sym, r(e), e.done, mode === 'st' && e.done ? e.exit : null)).join('')}</div>
+        </div>`;
+      }).join('')}</div>
+      ${dayGroups(H).length > 12 && !S.histMore ? '<button class="btn ghost" data-histmore="1">Ver todos os dias</button>' : ''}
+      <p class="note">⚠️ É uma simulação: a regra foi desenhada olhando parte desses mesmos dados, então os números tendem a parecer melhores do que serão. A prova definitiva é o registro oficial acima, que cresce a cada alerta real.</p>
+    </div>`;
+
+  // curva de lucro acumulado (pela data de saída)
+  const pts = [{ t: firstT ?? Date.now(), v: 0 }];
+  let cum = 0;
+  for (const x of done.slice().sort((a, b) => a.t - b.t)) { cum += r(x) * unitUsd; pts.push({ t: x.t + x.days * 864e5, v: cum }); }
+  const series = pts.sort((a, b) => a.t - b.t).map(p => ({ t: p.t, o: p.v, h: p.v, l: p.v, c: p.v, v: 0 }));
+  if (series.length > 1) {
+    const ch = new PriceChart($('#histChart'), { fmt: v => money(v, { sign: true }),
+      onHover: pt => { const h = $('#hHover'); if (h) h.innerHTML = pt ? `<span class="${cls(pt.c)}">${money(pt.c, { sign: true })}</span> <span class="muted">até ${fmtDate(pt.t)}</span>` : ''; } });
+    ch.setData(series, { animate: true });
+  }
+}
+
 function renderSignals() {
   const el = $('#view-signals');
   if (S.loading) { el.innerHTML = '<div class="skeleton" style="height:300px;margin-top:10px"></div>'; return; }
+  const tabs = `<div class="seg" style="margin-top:10px"><button data-sigtab="now" class="${S.sigTab !== 'hist' ? 'on' : ''}">📡 Agora</button><button data-sigtab="hist" class="${S.sigTab === 'hist' ? 'on' : ''}">📒 Histórico de alertas</button></div>`;
+  if (S.sigTab === 'hist') { renderHistory(el, tabs); return; }
   const list = ranked().filter(({ c }) => S.sigFilter === 'all' || isFav(c.sym));
-  el.innerHTML = `<h2 class="section">Ranking de oportunidades <small class="muted">horizonte ${PARAMS.horizon} dias</small></h2>
+  el.innerHTML = `${tabs}<h2 class="section">Ranking de oportunidades <small class="muted">horizonte ${PARAMS.horizon} dias</small></h2>
     <div class="seg" style="margin-bottom:12px"><button data-sigf="all" class="${S.sigFilter === 'all' ? 'on' : ''}">Todas</button><button data-sigf="fav" class="${S.sigFilter === 'fav' ? 'on' : ''}">★ Favoritas</button></div>
     ${!list.length ? '<div class="empty">Nenhuma favorita ainda. Toque na ☆ de uma moeda para adicioná-la.</div>' : ''}
     ${list.map(({ c, a }) => {
@@ -1185,6 +1295,9 @@ document.addEventListener('click', e => {
   if (e.target.closest('[data-editdone]')) { S.editPos = null; document.activeElement?.blur(); renderSim(); return; }
   const fv = e.target.closest('[data-fav]'); if (fv) { e.preventDefault(); return toggleFav(fv.dataset.fav); }
   const go = e.target.closest('[data-goto]'); if (go) return switchView(go.dataset.goto);
+  const st = e.target.closest('[data-sigtab]'); if (st) { S.sigTab = st.dataset.sigtab; if (S.sigTab === 'hist') loadAlertLog(); renderSignals(); return; }
+  const hm = e.target.closest('[data-hmode]'); if (hm) { S.histMode = hm.dataset.hmode; renderSignals(); return; }
+  if (e.target.closest('[data-histmore]')) { S.histMore = true; renderSignals(); return; }
   const sf = e.target.closest('[data-sigf]'); if (sf) { S.sigFilter = sf.dataset.sigf; return renderSignals(); }
   const nm = e.target.closest('[data-notify]'); if (nm) { S.notifyMode = nm.dataset.notify; store.set('notifyMode', S.notifyMode); return renderSettings(); }
   const add = e.target.closest('[data-add]'); if (add) return addCoin(add.dataset.add);

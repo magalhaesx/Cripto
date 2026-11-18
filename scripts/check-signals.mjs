@@ -73,6 +73,26 @@ console.log(table.join('\n'));
 console.log(`\nClima: ${regime ? `${{ bull: 'alta', correction: 'correção na alta', bear: 'BAIXA LONGA (alertas pausados)' }[regime.state]} — BTC ${Math.round(regime.dist * 100)}% da MM200, MM200 ${(regime.slope * 100).toFixed(1)}% em ${PARAMS.regimeSlopeDays}d` : 'indisponível'}`);
 console.log(`Amplitude: ${Math.round(share * 100)}% das moedas no gatilho (mínimo para alertar: ${PARAMS.minBreadth * 100}%).`);
 
+// ---------------------------------------------------------------------------
+// Registro oficial: cada alerta é gravado na hora em data/alerts-log.json (commit no repositório)
+// ---------------------------------------------------------------------------
+const LOG = 'data/alerts-log.json';
+let log = []; try { log = JSON.parse(readFileSync(LOG, 'utf8')); } catch {}
+let fngNow = null;
+try { const r = await fetch('https://api.alternative.me/fng/?limit=1'); fngNow = +(await r.json()).data[0].value; } catch {}
+let logged = 0;
+for (const c of COINS) {
+  const a = results[c.sym];
+  if (a?.verdict !== 'buy') continue;
+  // um registro por episódio: não repete a mesma moeda dentro do prazo da estratégia
+  if (log.some(e => e.sym === c.sym && now - e.t < PARAMS.horizon * 864e5)) continue;
+  log.push({ t: now, sym: c.sym, price: +a.price.toPrecision(8), strong: a.trigger === 'strong', regime: regime?.state ?? null,
+    share: +share.toFixed(3), rsi: +a.rsi.toFixed(1), drop30: +a.dd30.toFixed(4), fng: fngNow });
+  logged++;
+}
+if (logged) { mkdirSync('data', { recursive: true }); writeFileSync(LOG, JSON.stringify(log, null, 1) + '\n'); }
+console.log(`Registro oficial: ${logged} alerta(s) novo(s) gravado(s) (${log.length} no total).`);
+
 const pct = x => `${Math.round(x * 100)}%`;
 function payloadFor(list) {
   if (list.length >= 3) {

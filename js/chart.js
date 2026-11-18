@@ -300,3 +300,34 @@ export function drawDonut(canvas, segs) {
   }
   ctx.shadowBlur = 0;
 }
+
+// Velocímetro 0–100 (Medo e Ganância): vermelho → laranja → amarelo → verde
+export function drawGauge(canvas, value) {
+  if (!canvas) return;
+  const { ctx, w, h } = setupCanvas(canvas);
+  ctx.clearRect(0, 0, w, h);
+  const cx = w / 2, cy = h - 8, r = Math.min(w / 2, h) - 12;
+  if (r <= 0) return;
+  const cols = ['#FF5C7A', '#FF9F5A', '#FFD166', '#9BE564', '#2EE6A6'];
+  ctx.lineWidth = 12; ctx.lineCap = 'butt';
+  cols.forEach((c, k) => { ctx.strokeStyle = hexA(c, 0.9); ctx.beginPath(); ctx.arc(cx, cy, r, Math.PI + k * Math.PI / 5 + 0.02, Math.PI + (k + 1) * Math.PI / 5 - 0.02); ctx.stroke(); });
+  if (value == null) return;
+  const a = Math.PI + (value / 100) * Math.PI;
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 3; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx + Math.cos(a) * (r - 4), cy + Math.sin(a) * (r - 4)); ctx.stroke();
+  ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(cx, cy, 5, 0, 7); ctx.fill();
+}
+
+// Barrinhas do histórico do índice (30 dias)
+export function drawFngBars(canvas, data) {
+  if (!canvas || !data?.length) return;
+  const { ctx, w, h } = setupCanvas(canvas);
+  ctx.clearRect(0, 0, w, h);
+  const bw = w / data.length;
+  data.forEach((d, i) => {
+    const col = d.v <= 20 ? '#FF5C7A' : d.v <= 40 ? '#FF9F5A' : d.v <= 60 ? '#FFD166' : d.v <= 80 ? '#9BE564' : '#2EE6A6';
+    const bh = Math.max(2, (d.v / 100) * h);
+    ctx.fillStyle = hexA(col, i === data.length - 1 ? 1 : 0.7);
+    ctx.fillRect(i * bw + 1, h - bh, bw - 2, bh);
+  });
+}

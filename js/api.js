@@ -118,3 +118,15 @@ export async function fetchAllUsdtSymbols() {
     .sort((a, b) => b.quoteVol - a.quoteVol);
   return allPairs;
 }
+
+// Índice de Medo e Ganância (alternative.me) — últimos 30 dias, cache de 1 h
+export async function fetchFearGreed() {
+  const KEY = 'fng-v1';
+  try { const c = JSON.parse(localStorage.getItem(KEY) || 'null'); if (c && Date.now() - c.at < 36e5) return c.data; } catch {}
+  try {
+    const j = await getJSON('https://api.alternative.me/fng/?limit=30&format=json');
+    const data = j.data.map(x => ({ t: +x.timestamp * 1000, v: +x.value })).reverse();
+    try { localStorage.setItem(KEY, JSON.stringify({ at: Date.now(), data })); } catch {}
+    return data;
+  } catch { try { return JSON.parse(localStorage.getItem(KEY) || 'null')?.data || null; } catch { return null; } }
+}

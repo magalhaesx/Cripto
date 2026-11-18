@@ -3,7 +3,7 @@
 import webpush from 'web-push';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { COINS as BASE } from '../js/coins.js';
-import { analyze, applyBreadth, PARAMS } from '../js/analysis.js';
+import { analyze, applyBreadth, marketRegime, PARAMS } from '../js/analysis.js';
 import { STUDY } from '../js/study.js';
 import { firstHit, expandPos, exitMessage } from '../js/positions.js';
 import { alertHit, expandAlert, alertMessage } from '../js/alerts.js';
@@ -46,18 +46,22 @@ for (const s of subs) for (const sym of s.radar?.extra || []) {
 const state = loadState();
 const now = Date.now();
 const results = {};
+let btcCandles = null;
 const table = [];
 
 for (const c of COINS) {
   try {
-    const a = analyze(await klines(c.sym), PARAMS, STUDY);
+    const cs = await klines(c.sym);
+    if (c.sym === 'BTC') btcCandles = cs;
+    const a = analyze(cs, PARAMS, STUDY);
     if (!a.ok) { table.push(`${c.sym.padEnd(6)} sem histórico suficiente`); continue; }
     results[c.sym] = a;
   } catch (e) {
     table.push(`${c.sym.padEnd(6)} erro: ${e.message}`);
   }
 }
-const share = applyBreadth(results, PARAMS, STUDY);
+const regime = marketRegime(btcCandles);
+const share = applyBreadth(results, PARAMS, STUDY, regime);
 const alerts = [];
 for (const c of COINS) {
   const a = results[c.sym]; if (!a) continue;
@@ -66,7 +70,8 @@ for (const c of COINS) {
   if (!a.trigger) delete state[c.sym]; // gatilho desarmou: permite novo alerta na próxima queda
 }
 console.log(table.join('\n'));
-console.log(`\nAmplitude: ${Math.round(share * 100)}% das moedas no gatilho (mínimo para alertar: ${PARAMS.minBreadth * 100}%).`);
+console.log(`\nClima: ${regime ? `${{ bull: 'alta', correction: 'correção na alta', bear: 'BAIXA LONGA (alertas pausados)' }[regime.state]} — BTC ${Math.round(regime.dist * 100)}% da MM200, MM200 ${(regime.slope * 100).toFixed(1)}% em ${PARAMS.regimeSlopeDays}d` : 'indisponível'}`);
+console.log(`Amplitude: ${Math.round(share * 100)}% das moedas no gatilho (mínimo para alertar: ${PARAMS.minBreadth * 100}%).`);
 
 const pct = x => `${Math.round(x * 100)}%`;
 function payloadFor(list) {
@@ -74,7 +79,7 @@ function payloadFor(list) {
     const strong = list.filter(x => x.a.trigger === 'strong').map(x => x.c.sym);
     return {
       title: `🟢 Pânico no mercado: ${list.length} moedas em oportunidade de repique`,
-      body: `${list.map(x => x.c.sym).join(', ')}.${strong.length ? ` Sinal forte: ${strong.join(', ')}.` : ''} Historicamente ${pct(STUDY.breadth?.panicWinRate ?? STUDY.winRate)} subiram em ${PARAMS.horizon} dias.`,
+      body: `${list.map(x => x.c.sym).join(', ')}.${strong.length ? ` Sinal forte: ${strong.join(', ')}.` : ''} Historicamente ${pct(STUDY.alerts?.win ?? STUDY.winRate)} subiram em ${PARAMS.horizon} dias.`,
       url: SITE, tag: 'radar-buy',
     };
   }

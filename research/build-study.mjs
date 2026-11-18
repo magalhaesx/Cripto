@@ -1,7 +1,7 @@
 // Gera js/study.js: estatísticas agregadas (30 moedas, histórico completo) da estratégia escolhida.
 // Esses números aparecem no app como "o estudo por trás" e alimentam a simulação quando a moeda tem poucos casos.
 import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
-import { computeIndicators, quantile, PARAMS, isTrigger } from '../js/analysis.js';
+import { computeIndicators, quantile, PARAMS, isTrigger, marketRegime } from '../js/analysis.js';
 import { readFileSync as rf } from 'node:fs';
 const dir = process.argv[2] || 'research/data';
 const H = PARAMS.horizon, COST = PARAMS.costPct;
@@ -25,6 +25,9 @@ for (const f of readdirSync(dir).filter(f => f.endsWith('.json'))) {
   const cs = JSON.parse(rf(`${dir}/${f}`)); const d = computeIndicators(cs);
   for (let i = 30; i < d.c.length; i++) { active[cs[i].t] = (active[cs[i].t] || 0) + 1; if (isTrigger(d, i)) trigCount[cs[i].t] = (trigCount[cs[i].t] || 0) + 1; }
 }
+// clima (tendência do BTC) em cada dia
+const btcCs = JSON.parse(rf(`${dir}/BTC.json`));
+const regimeAt = new Map(); for (let i = 230; i < btcCs.length; i++) regimeAt.set(btcCs[i].t, marketRegime(btcCs.slice(0, i + 1)).state);
 const panic = ev.filter(e => trigCount[e.t] / active[e.t] >= PARAMS.minBreadth).map(e => e.r);
 const isolated = ev.filter(e => trigCount[e.t] / active[e.t] < PARAMS.minBreadth).map(e => e.r);
 const s = ev.map(e => e.r).sort((a, b) => a - b);
@@ -46,6 +49,10 @@ const study = {
   coins, from: new Date(from).toISOString().slice(0, 10), to: new Date(ev.at(-1).t).toISOString().slice(0, 10),
   events: ev.length, winRate: +win(s).toFixed(4), baseWinRate: +win(base).toFixed(4),
   strongEvents: strong.length, strongWinRate: +win(strong).toFixed(4),
+  climate: Object.fromEntries(['bull', 'correction', 'bear'].map(k => { const a = ev.filter(e => trigCount[e.t] / active[e.t] >= PARAMS.minBreadth && regimeAt.get(e.t) === k).map(e => e.r); return [k, { n: a.length, win: +win(a).toFixed(4) }]; })),
+  alerts: (() => { const a = ev.filter(e => trigCount[e.t] / active[e.t] >= PARAMS.minBreadth && regimeAt.has(e.t) && regimeAt.get(e.t) !== 'bear'); const r = a.map(e => e.r).sort((x, y) => x - y);
+    const per = k => { const b = a.filter(e => (e.t < Date.UTC(2023, 0, 1)) === (k === 'is')).map(e => e.r); return { n: b.length, win: +win(b).toFixed(4) }; };
+    return { n: r.length, win: +win(r).toFixed(4), median: +quantile(r, 0.5).toFixed(4), study: per('is'), proof: per('oos') }; })(),
   breadth: { panicEvents: panic.length, panicWinRate: +win(panic).toFixed(4), isolatedEvents: isolated.length, isolatedWinRate: +win(isolated).toFixed(4) },
   median: q[3], quantiles: { p5: q[0], p10: q[1], p25: q[2], p50: q[3], p75: q[4], p90: q[5], p95: q[6] },
   weeks: w.length, tWeekly: +tstat(wEx).toFixed(2), tWeeklyWin: +tstat(wWin).toFixed(2),

@@ -10,6 +10,33 @@ export const STUDY = {
  "baseWinRate": 0.468,
  "strongEvents": 126,
  "strongWinRate": 0.6349,
+ "climate": {
+  "bull": {
+   "n": 132,
+   "win": 0.5758
+  },
+  "correction": {
+   "n": 145,
+   "win": 0.7931
+  },
+  "bear": {
+   "n": 206,
+   "win": 0.4854
+  }
+ },
+ "alerts": {
+  "n": 277,
+  "win": 0.6895,
+  "median": 0.0378,
+  "study": {
+   "n": 90,
+   "win": 0.6333
+  },
+  "proof": {
+   "n": 187,
+   "win": 0.7166
+  }
+ },
  "breadth": {
   "panicEvents": 488,
   "panicWinRate": 0.6004,

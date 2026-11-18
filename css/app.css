@@ -288,3 +288,22 @@ textarea.code { width: 100%; min-height: 110px; background: var(--bg2); color: #
 .alert-row.hit { background: linear-gradient(90deg, rgba(46,230,166,.12), transparent); }
 .al-prog { height: 4px; border-radius: 2px; background: rgba(255,255,255,.07); margin-top: 6px; overflow: hidden; max-width: 180px; }
 .al-prog i { display: block; height: 100%; border-radius: 2px; }
+
+/* clima do mercado */
+.climate-row { display: flex; gap: 14px; align-items: center; }
+.gauge { width: 132px; flex: 0 0 132px; }
+.gauge canvas { width: 132px; height: 72px; display: block; }
+.gauge-v { text-align: center; line-height: 1.1; margin-top: 4px; }
+.gauge-v b { font-size: 22px; display: block; }
+.gauge-v span { font-size: 11px; color: var(--muted); font-weight: 600; }
+.climate-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.regime { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; }
+.regime b { font-size: 15px; }
+.regime-ic { font-size: 24px; line-height: 1; }
+.small { font-size: 11px; }
+.climate-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 14px; }
+.climate-stats .stat { padding: 9px 10px; }
+.climate-stats .v { font-size: 17px; }
+.climate-stats .v small { font-size: 12px; color: var(--muted); }
+.fng-hist { margin-top: 12px; }
+.fng-hist canvas { width: 100%; height: 34px; display: block; margin-top: 4px; }

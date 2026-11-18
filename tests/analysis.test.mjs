@@ -79,3 +79,12 @@ test('alerta de preço: acima e abaixo', () => {
   assert.equal(alertHit({ ...dn, at: 72e5 }, [k(0, 50, 100), k(72e5, 95, 100)]), null);
   assert.deepEqual(expandAlert(compactAlert(up)), up);
 });
+
+import { marketRegime } from '../js/analysis.js';
+test('clima: alta, correção e baixa longa', () => {
+  const mk = f => Array.from({ length: 400 }, (_, i) => ({ t: i * 864e5, c: f(i) }));
+  assert.equal(marketRegime(mk(i => 100 + i)).state, 'bull');
+  assert.equal(marketRegime(mk(i => i < 390 ? 100 + i : 200)).state, 'correction');   // caiu abaixo da MM200, que ainda sobe
+  assert.equal(marketRegime(mk(i => 500 - i)).state, 'bear');
+  assert.equal(marketRegime(mk(i => 100).slice(0, 100)), null);
+});

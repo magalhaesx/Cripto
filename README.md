@@ -5,6 +5,7 @@ App para iPhone (PWA — instalado pelo Safari, sem App Store) que **avisa quand
 - Gráficos em tempo real, coloridos e interativos (arraste o dedo para ver preço e data)
 - Preço ao vivo, máxima e mínima histórica, máx./mín. 24h, volume, valor de mercado
 - **Estratégia validada em estudo**: repique após pânico de mercado (queda ≥25% em 30 dias + RSI<30 + várias moedas caindo juntas) — 60% de acerto em 7 dias vs 47% de um dia qualquer, em 30 moedas desde 2017
+- **Clima do mercado**: Índice de Medo e Ganância, tendência do Bitcoin e quantas moedas estão em pânico; em baixa longa do BTC os alertas são pausados (nesse clima o repique não teve vantagem)
 - Distância do gatilho (0–100) por moeda + explicação curta do porquê
 - **Simulação**: digite quanto quer investir e veja cenários pessimista/provável/otimista e a chance de lucro, baseados em casos reais
 - **Carteira fictícia com painel**: saldo virtual (R$ 10.000 por padrão), compras e vendas que mexem no saldo, gráfico de evolução do patrimônio, distribuição por moeda, lucro realizado/não realizado, ativos agrupados por moeda e histórico de movimentações

@@ -16,7 +16,8 @@ export const PARAMS = {
   dropPct: -0.25,     // queda mínima em relação à máxima de 30 dias
   rsiMax: 30,         // RSI(14) abaixo disto
   rsiStrong: 25,      // RSI(14) abaixo disto = sinal forte
-  minBreadth: 0.15,   // alerta só se >= 15% das moedas estiverem no gatilho juntas (pânico de mercado)
+  minBreadth: 0.15,
+  regimeSlopeDays: 30, // inclinação da MM200 do BTC medida em 30 dias (testado de 10 a 90: mesmo resultado)   // alerta só se >= 15% das moedas estiverem no gatilho juntas (pânico de mercado)
   minCoinWin: 0.45,   // se a própria moeda tiver >=5 casos e acerto abaixo disto, rebaixa para "observar"
   costPct: 0.002,     // custo ida+volta (taxas/spread) = 0,2%
   warmup: 210,        // candles necessários para os indicadores de contexto (MM200)
@@ -345,7 +346,19 @@ export function analyze(candles, P = PARAMS, study = null) {
 // Queda ISOLADA de uma moeda (provável notícia ruim própria) teve repique inconsistente;
 // pânico GERAL (várias moedas no gatilho ao mesmo tempo) teve vantagem nos dois períodos.
 // Recebe {sym: análise} de todas as moedas e ajusta o veredito de cada uma.
-export function applyBreadth(analyses, P = PARAMS, study = null) {
+// ---------- clima do mercado (tendência do Bitcoin) ----------------------------
+// 'bear'       = BTC abaixo da MM200 e MM200 caindo  → baixa longa (repique sem vantagem: ~49%)
+// 'correction' = BTC abaixo da MM200, MM200 subindo  → correção dentro de alta (melhor clima: ~78%)
+// 'bull'       = BTC acima da MM200                   → alta
+export function marketRegime(btcCandles, P = PARAMS) {
+  if (!btcCandles || btcCandles.length < 200 + P.regimeSlopeDays) return null;
+  const c = btcCandles.map(k => k.c), ma = sma(c, 200), i = c.length - 1;
+  const slope = ma[i] / ma[i - P.regimeSlopeDays] - 1;
+  const state = c[i] > ma[i] ? 'bull' : slope < 0 ? 'bear' : 'correction';
+  return { state, price: c[i], ma200: ma[i], dist: c[i] / ma[i] - 1, slope };
+}
+
+export function applyBreadth(analyses, P = PARAMS, study = null, regime = null) {
   const list = Object.values(analyses).filter(a => a?.ok);
   const trig = list.filter(a => a.trigger).length;
   const share = list.length ? trig / list.length : 0;
@@ -359,7 +372,12 @@ export function applyBreadth(analyses, P = PARAMS, study = null) {
       if (a.verdict === 'buy') a.verdict = 'watch';
       a.warnings.unshift(`Queda isolada (só ${trig} de ${list.length} moedas no gatilho): no histórico recente, quedas isoladas não tiveram repique confiável`);
       a.summary = 'Gatilho disparou, mas é uma queda isolada desta moeda — historicamente pouco confiável. Fica em "observar".';
+    } else if (regime?.state === 'bear') {
+      if (a.verdict === 'buy') a.verdict = 'watch';
+      a.warnings.unshift(`Bitcoin em baixa longa (abaixo da média de 200 dias, que está caindo): nesse clima o repique acertou só ${study?.climate ? Math.round(study.climate.bear.win * 100) : 49}% — sem vantagem`);
+      a.summary = 'Gatilho disparou, mas o mercado está em baixa longa — clima em que o repique não teve vantagem no histórico. Fica em "observar".';
     } else {
+      if (regime?.state === 'correction') a.reasons.splice(2, 0, `Clima favorável: correção dentro da tendência de alta do Bitcoin${study?.climate ? ` (${Math.round(study.climate.correction.win * 100)}% de acerto nesse clima)` : ''}`);
       a.reasons.splice(2, 0, `Pânico de mercado: ${trig} de ${list.length} moedas no gatilho ao mesmo tempo${study?.breadth ? ` (nesse cenário, ${Math.round(study.breadth.panicWinRate * 100)}% subiram em ${P.horizon} dias)` : ''}`);
     }
   }

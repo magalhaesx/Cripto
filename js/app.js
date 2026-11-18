@@ -1,10 +1,10 @@
 import { COINS as BASE_COINS, colorFor } from './coins.js';
-import { analyze, simulate, applyBreadth, PARAMS } from './analysis.js';
+import { analyze, simulate, applyBreadth, marketRegime, PARAMS } from './analysis.js';
 import { STUDY } from './study.js';
 import { firstHit, compactPos, exitMessage } from './positions.js';
 import { alertHit, compactAlert, alertMessage } from './alerts.js';
-import { fetchDaily, fetchKlines, fetchTickers24h, fetchUsdBrl, fetchMarkets, connectLive, fetchAllUsdtSymbols, RANGES } from './api.js';
-import { PriceChart, drawSpark, drawHistogram, drawScoreRing, drawDonut, scoreColor } from './chart.js';
+import { fetchDaily, fetchKlines, fetchTickers24h, fetchUsdBrl, fetchMarkets, connectLive, fetchAllUsdtSymbols, fetchFearGreed, RANGES } from './api.js';
+import { PriceChart, drawSpark, drawHistogram, drawScoreRing, drawDonut, drawGauge, drawFngBars, scoreColor } from './chart.js';
 import { VAPID_PUBLIC_KEY } from './config.js';
 
 // ---------------------------------------------------------------------------
@@ -97,7 +97,8 @@ const price = sym => S.tickers[sym]?.price ?? S.daily[sym]?.at(-1)?.c;
 async function loadAll() {
   $('#refreshBtn').classList.add('spin');
   S.error = null;
-  const [tick, rate, markets] = await Promise.allSettled([fetchTickers24h(COINS), fetchUsdBrl(), fetchMarkets(COINS)]);
+  const [tick, rate, markets, fng] = await Promise.allSettled([fetchTickers24h(COINS), fetchUsdBrl(), fetchMarkets(COINS), fetchFearGreed()]);
+  if (fng.status === 'fulfilled' && fng.value) S.fng = fng.value;
   if (tick.status === 'fulfilled') Object.assign(S.tickers, tick.value);
   if (rate.status === 'fulfilled' && rate.value) { S.rate = rate.value; store.set('rate', S.rate); }
   if (markets.status === 'fulfilled') S.markets = markets.value;
@@ -109,7 +110,7 @@ async function loadAll() {
     S.analysis[c.sym] = analyze(d, PARAMS, STUDY);
   }));
   const failed = results.filter(r => r.status === 'rejected').length;
-  applyBreadth(S.analysis, PARAMS, STUDY);
+  S.regime = marketRegime(S.daily.BTC); applyBreadth(S.analysis, PARAMS, STUDY, S.regime);
   if (failed === COINS.length) S.error = 'Não foi possível baixar os dados de mercado. Verifique a internet e toque em atualizar.';
   S.loading = false;
   $('#refreshBtn').classList.remove('spin');
@@ -126,7 +127,7 @@ function reanalyze() {
     last.c = p; last.h = Math.max(last.h, p); last.l = Math.min(last.l, p);
     S.analysis[c.sym] = analyze(d, PARAMS, STUDY);
   }
-  applyBreadth(S.analysis, PARAMS, STUDY);
+  S.regime = marketRegime(S.daily.BTC); applyBreadth(S.analysis, PARAMS, STUDY, S.regime);
   renderAll(true);
   checkAlerts();
 }
@@ -152,7 +153,7 @@ async function checkAlerts() {
   if (fresh.length >= 3) {   // várias de uma vez: um aviso só, sem encher a tela
     const strong = fresh.filter(x => x.a.trigger === 'strong').map(x => x.c.sym);
     title = `🟢 Pânico no mercado: ${fresh.length} moedas em oportunidade de repique`;
-    body = `${fresh.map(x => x.c.sym).join(', ')}.${strong.length ? ` Sinal forte: ${strong.join(', ')}.` : ''} Historicamente ${pct0(STUDY.breadth?.panicWinRate ?? STUDY.winRate)} subiram em ${PARAMS.horizon} dias.`;
+    body = `${fresh.map(x => x.c.sym).join(', ')}.${strong.length ? ` Sinal forte: ${strong.join(', ')}.` : ''} Historicamente ${pct0(STUDY.alerts?.win ?? STUDY.winRate)} subiram em ${PARAMS.horizon} dias.`;
     url = './'; open = () => switchView('signals');
   } else {
     const { c, a } = fresh[0];
@@ -214,6 +215,49 @@ function coinRow(c) {
   </button>`;
 }
 
+// ---------------------------------------------------------------------------
+// Clima do mercado
+// ---------------------------------------------------------------------------
+const FNG_LABEL = v => v <= 20 ? 'Medo extremo' : v <= 40 ? 'Medo' : v <= 60 ? 'Neutro' : v <= 80 ? 'Ganância' : 'Ganância extrema';
+const FNG_COLOR = v => v <= 20 ? 'var(--down)' : v <= 40 ? 'var(--orange)' : v <= 60 ? 'var(--gold)' : v <= 80 ? '#9BE564' : 'var(--up)';
+const REGIME = {
+  bull: { icon: '🐂', name: 'Alta', cls: 'buy', txt: 'Bitcoin acima da média de 200 dias.', verdict: 'Neutro para repiques', vcls: 'neutral' },
+  correction: { icon: '🔄', name: 'Correção na alta', cls: 'watch', txt: 'Bitcoin abaixo da média de 200 dias, mas ela ainda sobe.', verdict: 'Favorável para repiques', vcls: 'buy' },
+  bear: { icon: '🐻', name: 'Baixa longa', cls: 'avoid', txt: 'Bitcoin abaixo da média de 200 dias, que está caindo.', verdict: 'Desfavorável — alertas pausados', vcls: 'avoid' },
+};
+function climateCard() {
+  const g = S.regime, f = S.fng?.at(-1)?.v;
+  if (!g && f == null) return '';
+  const R0 = g ? REGIME[g.state] : null;
+  const list = Object.values(S.analysis).filter(a => a?.ok);
+  const trig = list.filter(a => a.trigger).length;
+  const above = list.filter(a => a.above200).length;
+  const cw = g && STUDY.climate?.[g.state];
+  return `<div class="card climate" id="climate">
+    <h3>🌡️ Clima do mercado ${R0 ? `<span class="chip ${R0.vcls}">${R0.verdict.toUpperCase()}</span>` : ''}</h3>
+    <div class="climate-row">
+      <div class="gauge"><canvas id="fngGauge"></canvas>
+        <div class="gauge-v"><b class="num" style="color:${f != null ? FNG_COLOR(f) : 'inherit'}">${f ?? '—'}</b><span>${f != null ? FNG_LABEL(f) : 'Medo e Ganância'}</span></div></div>
+      <div class="climate-info">
+        ${R0 ? `<div class="regime"><span class="regime-ic">${R0.icon}</span><div><b>${R0.name}</b><div class="muted">${R0.txt}</div></div></div>` : ''}
+        ${g ? `<div class="muted small">BTC ${pct(g.dist, 1)} da MM200 · MM200 ${g.slope >= 0 ? 'subindo' : 'caindo'} ${pct(g.slope, 1)} em ${PARAMS.regimeSlopeDays}d</div>` : ''}
+      </div>
+    </div>
+    <div class="climate-stats">
+      <div class="stat"><div class="k">Moedas em pânico</div><div class="v num ${trig / list.length >= PARAMS.minBreadth ? 'down' : ''}">${trig}<small>/${list.length}</small></div><div class="s">no gatilho de queda</div></div>
+      <div class="stat"><div class="k">Acima da MM200</div><div class="v num">${list.length ? pct0(above / list.length) : '—'}</div><div class="s">saúde do mercado</div></div>
+      <div class="stat"><div class="k">Repique nesse clima</div><div class="v num ${cw ? (cw.win >= 0.55 ? 'up' : 'down') : ''}">${cw ? pct0(cw.win) : '—'}</div><div class="s">${cw ? `${cw.n} casos` : ''}</div></div>
+    </div>
+    ${S.fng?.length ? `<div class="fng-hist"><span class="muted small">Medo e Ganância — 30 dias</span><canvas id="fngBars"></canvas></div>` : ''}
+    <p class="note" style="margin-bottom:0">${g?.state === 'bear' ? 'Em baixa longa do Bitcoin, quedas fortes costumam continuar: o repique acertou só ' + (STUDY.climate ? pct0(STUDY.climate.bear.win) : '49%') + ' no histórico. Por isso os alertas de compra viram "observar" até o clima mudar.' : g?.state === 'correction' ? 'Melhor clima para a estratégia: quedas fortes dentro de uma tendência de alta do Bitcoin tiveram ' + (STUDY.climate ? pct0(STUDY.climate.correction.win) : '79%') + ' de repique em 7 dias.' : 'O índice de Medo e Ganância é só informativo: no estudo ele não melhorou o acerto dos alertas.'}</p>
+  </div>`;
+}
+function drawClimate() {
+  const f = S.fng?.at(-1)?.v;
+  drawGauge($('#fngGauge'), f);
+  drawFngBars($('#fngBars'), S.fng);
+}
+
 function renderHome(soft) {
   const el = $('#view-home');
   if (S.loading) {
@@ -239,6 +283,7 @@ function renderHome(soft) {
       </div>
     </div>
     ${S.error ? `<div class="err">${S.error}</div>` : ''}
+    ${climateCard()}
     <h2 class="section">Destaques <small class="muted">distância do gatilho 0–100</small></h2>
     ${opps.length ? `<div class="opps">${opps.map(({ c, a }) => `
       <button class="opp ${a.verdict}" data-open="${c.sym}">
@@ -256,7 +301,7 @@ function renderHome(soft) {
     <div class="list">${COINS.filter(c => !isFav(c.sym)).map(coinRow).join('')}</div>
     <button class="btn ghost" data-goto="settings">＋ Adicionar outras moedas</button>`;
   if (soft) $('.opps', el)?.scrollTo(scrollX, 0);
-  drawSparks();
+  drawSparks(); drawClimate();
 }
 
 function drawSparks() {
@@ -594,7 +639,13 @@ function renderSettings() {
         <div class="stat"><div class="k">Sinal forte</div><div class="v num up">${pct0(STUDY.strongWinRate)}</div><div class="s">${STUDY.strongEvents} casos</div></div>
       </div>
       <p><b>Só alerta em pânico de mercado:</b> é preciso que pelo menos ${PARAMS.minBreadth * 100}% das moedas estejam no gatilho juntas. Quedas isoladas (provável notícia ruim da própria moeda) tiveram só ${pct0(STUDY.breadth.isolatedWinRate)} de acerto; em pânico geral, ${pct0(STUDY.breadth.panicWinRate)}.</p>
-      <p class="muted">⚠️ Em mercados de baixa prolongados (2018, 2022, 2026) o acerto ficou perto de 50%. Mediana do ganho em 7 dias é modesta e os 10% piores casos perdem 12–19%: use o stop e não concentre tudo.</p>
+      <p><b>Clima do mercado:</b> se o Bitcoin estiver em <b>baixa longa</b> (abaixo da média de 200 dias e ela caindo), o alerta vira "observar" — nesse clima o repique acertou só ${pct0(STUDY.climate.bear.win)}. Em correção dentro de alta, ${pct0(STUDY.climate.correction.win)}. Testado com janelas de 10 a 90 dias: mesmo resultado. O índice de Medo e Ganância foi testado e <b>não</b> melhorou o acerto — aparece só como informação.</p>
+      <div class="bt-row" style="margin:10px 0">
+        <div class="stat ath"><div class="k">Regra final</div><div class="v num up">${pct0(STUDY.alerts.win)}</div><div class="s">${STUDY.alerts.n} alertas</div></div>
+        <div class="stat"><div class="k">Até 2022</div><div class="v num">${pct0(STUDY.alerts.study.win)}</div><div class="s">${STUDY.alerts.study.n} casos</div></div>
+        <div class="stat"><div class="k">2023+</div><div class="v num">${pct0(STUDY.alerts.proof.win)}</div><div class="s">${STUDY.alerts.proof.n} casos</div></div>
+      </div>
+      <p class="muted">⚠️ Em mercados de baixa prolongados (2018, 2022, 2026) o acerto ficou perto de 50%. É exatamente por isso que existe o filtro de clima acima. Mediana do ganho em 7 dias é modesta e os 10% piores casos perdem 12–19%: use o stop e não concentre tudo.</p>
       <p><b>Ano a ano</b> (acerto, todos os gatilhos): ${Object.entries(STUDY.byYear).map(([y, v]) => `<span class="${v.win >= STUDY.baseWinRate ? 'up' : 'down'}">${y}: ${pct0(v.win)}</span>`).join(' · ')}</p>
       <p><b>Simulação</b> usa a distribuição real dos resultados (pessimista = 10% piores casos, provável = mediana, otimista = 10% melhores) da própria moeda, ou do estudo completo quando a moeda tem poucos casos.</p>
       <p class="muted">Estudo reproduzível em <i>research/</i> no repositório. Base teórica: reversão de curto prazo (Jegadeesh 1990; Lehmann 1990) e sobre-reação em criptomoedas após quedas extremas.</p>
@@ -814,7 +865,9 @@ function detailAnalysis(c, a) {
     <div class="card"><h3>📊 Prova estatística</h3>
       <div class="note" style="margin:0 0 8px">Estudo com ${STUDY.coins} moedas (${STUDY.events} casos, ${STUDY.from.slice(0, 4)}–${STUDY.to.slice(0, 4)})</div>
       <div class="compare" style="margin-top:0">
-        <div class="lbl"><span>Subiram em ${PARAMS.horizon} dias após o gatilho</span><b class="up">${pct0(STUDY.winRate)}</b></div>
+        <div class="lbl"><span><b>Alertas do app</b> (pânico + clima ok)</span><b class="up">${pct0(STUDY.alerts.win)}</b></div>
+        <div class="track"><i style="width:${STUDY.alerts.win * 100}%;background:linear-gradient(90deg,var(--violet),var(--up))"></i></div>
+        <div class="lbl"><span>Subiram em ${PARAMS.horizon} dias após o gatilho (todos)</span><b class="up">${pct0(STUDY.winRate)}</b></div>
         <div class="track"><i style="width:${STUDY.winRate * 100}%;background:var(--up)"></i></div>
         <div class="lbl"><span>Após gatilho forte (RSI &lt; 25)</span><b class="up">${pct0(STUDY.strongWinRate)}</b></div>
         <div class="track"><i style="width:${STUDY.strongWinRate * 100}%;background:linear-gradient(90deg,#1fbf87,var(--up))"></i></div>
@@ -1048,7 +1101,7 @@ async function addCoin(sym) {
     const [d, h] = await Promise.all([fetchDaily(sym), fetchKlines(sym, '1h', 168).catch(() => null)]);
     S.daily[sym] = d; if (h) { S.spark[sym] = h.map(k => k.c); S.hourly[sym] = h; }
     S.analysis[sym] = analyze(d, PARAMS, STUDY);
-    applyBreadth(S.analysis, PARAMS, STUDY);
+    S.regime = marketRegime(S.daily.BTC); applyBreadth(S.analysis, PARAMS, STUDY, S.regime);
     Object.assign(S.tickers, await fetchTickers24h([c]).catch(() => ({})));
   } catch { toast(`Não consegui baixar os dados de ${sym}.`); }
   renderAll();
@@ -1083,7 +1136,7 @@ function switchView(v) {
   window.scrollTo({ top: 0 });
   if (v === 'settings') renderSettings();
   if (v === 'sim') renderSim();
-  if (v === 'home') requestAnimationFrame(drawSparks);
+  if (v === 'home') requestAnimationFrame(() => { drawSparks(); drawClimate(); });
 }
 
 document.addEventListener('click', e => {

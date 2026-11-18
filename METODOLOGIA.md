@@ -9,6 +9,8 @@ Pergunta que o app responde: **"historicamente, comprar numa situação como a d
 2. **RSI(14) < 30** (sobrevenda). RSI < 25 = sinal **forte**; e
 3. **Pânico de mercado**: pelo menos **15% das moedas acompanhadas** estão no gatilho ao mesmo tempo. Queda isolada de uma moeda fica só em "observar".
 
+4. **Clima do mercado** (`market-climate.mjs`): se o Bitcoin está em **baixa longa** (abaixo da MM200 **e** a MM200 caiu nos últimos 30 dias), o alerta vira "observar".
+
 **Horizonte:** 7 dias (operação curta: comprar no pânico, reavaliar em ~1 semana).
 **Rebaixamento:** se na própria moeda o padrão teve acerto < 45% em 5+ casos, vira "observar".
 
@@ -36,9 +38,25 @@ Significância (excesso vs. um dia qualquer do mesmo ano, agrupado por semana): 
 
 **Ano a ano (pânico de mercado):** 2018 44% · 2019 60% · 2020 100% · 2021 60% · 2022 48% · 2023 86% · 2024 63% · 2025 71% · 2026 50%.
 
+## Clima do mercado (v2.1)
+
+Testamos se o clima melhora os alertas (só alertas em pânico de mercado, 7 dias):
+
+| Clima (tendência do BTC) | Casos | Acerto | Até 2022 | 2023+ |
+|---|---|---|---|---|
+| Alta (BTC > MM200) | 132 | 58% | 46% | 62% |
+| Correção na alta (BTC < MM200, MM200 subindo) | 145 | 79% | 71% | 82% |
+| **Baixa longa** (BTC < MM200, MM200 caindo) | 206 | **49%** | 48% | 49% |
+
+A baixa longa não teve vantagem em nenhum dos dois períodos; o resultado se mantém com a inclinação da MM200 medida em 10, 20, 30, 45, 60 ou 90 dias. Por isso os alertas são pausados nesse clima.
+
+**Regra final (pânico + clima não-baixa-longa): 277 casos, 69% de acerto em 7 dias** (63% até 2022, 72% em 2023+), mediana +3,8%, contra 47% de um dia qualquer.
+
+**Índice de Medo e Ganância** (alternative.me, desde 2018): não melhorou o acerto de forma consistente (≤15: 52% → 73%; 16–25: 56% → 43%) e, sozinho como estratégia, não teve vantagem. Aparece no app apenas como informação.
+
 ## Limitações honestas
 
-- Em **mercados de baixa prolongados** (2018, 2022, 2026) o acerto fica perto de 50%: a queda continua.
+- Em **mercados de baixa prolongados** (2018, 2022, 2026) o acerto fica perto de 50%: a queda continua. O filtro de clima pausa os alertas nesses períodos.
 - O filtro de "pânico de mercado" foi identificado depois de olhar os dados; tem lógica econômica (queda isolada costuma ser notícia ruim da própria moeda; pânico geral costuma ser venda forçada/liquidez), mas ainda precisa ser confirmado com dados futuros.
 - Mediana do ganho em 7 dias é modesta (~+1,5% a +3%); os 10% piores casos perdem 12–19%. Use o stop.
 - Sinais em várias moedas no mesmo dia são correlacionados: se der errado, tende a dar errado em todas juntas. Não concentre tudo.
@@ -54,5 +72,6 @@ node research/fetch-history.mjs research/data      # baixa o histórico (precisa
 node research/backtest-strategies.mjs research/data
 node research/robustness.mjs research/data
 node research/market-wide.mjs research/data
+node research/market-climate.mjs research/data fng.json   # fng.json = https://api.alternative.me/fng/?limit=0
 node research/build-study.mjs research/data         # regenera js/study.js
 ```

@@ -4,7 +4,7 @@ import { STUDY } from './study.js';
 import { firstHit, compactPos, exitMessage } from './positions.js';
 import { alertHit, compactAlert, alertMessage } from './alerts.js';
 import { fetchDaily, fetchKlines, fetchTickers24h, fetchUsdBrl, fetchMarkets, connectLive, fetchAllUsdtSymbols, fetchFearGreed, RANGES } from './api.js';
-import { PriceChart, drawSpark, drawHistogram, drawScoreRing, drawDonut, drawGauge, drawFngBars, scoreColor } from './chart.js';
+import { PriceChart, MultiLineChart, drawSpark, drawHistogram, drawScoreRing, drawDonut, drawGauge, drawFngBars, scoreColor } from './chart.js';
 import { VAPID_PUBLIC_KEY, ALERT_LOG_URL, REPO } from './config.js';
 
 // ---------------------------------------------------------------------------
@@ -300,7 +300,7 @@ function renderHome(soft) {
       : '<div class="empty">Toque na <b>☆</b> ao lado de qualquer moeda para fixá-la aqui. Você também pode escolher receber notificações só das favoritas em Ajustes.</div>'}
     <h2 class="section">Mercado <small class="muted">${COINS.length} moedas · 24h</small></h2>
     <div class="list">${COINS.filter(c => !isFav(c.sym)).map(coinRow).join('')}</div>
-    <button class="btn ghost" data-goto="settings">＋ Adicionar outras moedas</button>`;
+    <div class="btn-row"><button class="btn ghost" data-compare="">⚖️ Comparar moedas</button><button class="btn ghost" data-goto="settings">＋ Adicionar moedas</button></div>`;
   if (soft) $('.opps', el)?.scrollTo(scrollX, 0);
   drawSparks(); drawClimate();
 }
@@ -800,7 +800,7 @@ function renderDetail() {
   const v = a?.ok ? VERDICT[a.verdict] : null;
   $('#sheetInner').innerHTML = `
     <div class="sheet-nav"><button class="back" id="closeSheet" aria-label="Voltar"><svg width="20" height="20" viewBox="0 0 24 24"><path fill="currentColor" d="M15.4 7.4 14 6l-6 6 6 6 1.4-1.4L10.8 12z"/></svg></button>
-      <div style="display:flex;gap:8px;align-items:center">${v ? `<span class="chip ${v.cls}" style="font-size:12px;padding:5px 10px">${v.label}</span>` : ''}${detailStar(sym)}</div></div>
+      <div style="display:flex;gap:8px;align-items:center">${v ? `<span class="chip ${v.cls}" style="font-size:12px;padding:5px 10px">${v.label}</span>` : ''}<button class="back" data-compare="${sym}" aria-label="Comparar" title="Comparar">⚖️</button>${detailStar(sym)}</div></div>
     <div class="d-head">${coinIcon(c, true)}<div><div class="d-name">${esc(c.name)}</div><div class="muted">${sym}${m.rank ? ` · #${m.rank} em valor de mercado` : ''}</div></div></div>
     <div class="d-price num" id="dPrice">${money(p)}</div>
     <div class="d-chg num" id="dChg"></div>
@@ -939,6 +939,108 @@ async function reconcileAlerts() {
     try { const ks = await fetchKlines(a.sym, '1h', 1000, a.at - 36e5); const h = alertHit(a, ks); if (h) fireAlert(a, ks.at(-1).c); } catch {}
   }
 }
+
+// ---------------------------------------------------------------------------
+// Comparar moedas lado a lado
+// ---------------------------------------------------------------------------
+const CMP_RANGES = { '7D': 7, '1M': 30, '1A': 365, 'TUDO': 5000 };
+function openCompare(sym) {
+  const base = sym ? [sym, sym === 'BTC' ? 'ETH' : 'BTC'] : (S.favs.length >= 2 ? S.favs.slice(0, 3) : ['BTC', 'ETH', 'SOL']);
+  S.cmp = { syms: base.filter(x => coinBySym[x]), range: S.cmp?.range || '1A', picking: false };
+  const sh = $('#cmpSheet'); sh.classList.add('open'); sh.setAttribute('aria-hidden', 'false'); sh.scrollTop = 0;
+  renderCompare();
+}
+function closeCompare() { const sh = $('#cmpSheet'); sh.classList.remove('open'); sh.setAttribute('aria-hidden', 'true'); }
+
+function cmpSeries(sym, days) {
+  if (days === 7 && S.hourly[sym]?.length) return S.hourly[sym].map(k => ({ t: k.t, c: k.c }));
+  const d = S.daily[sym] || []; return d.slice(-days - 1).map(k => ({ t: k.t, c: k.c }));
+}
+function cmpMetrics(sym, start) {
+  const c = coinBySym[sym], d = S.daily[sym] || [], a = S.analysis[sym], t = S.tickers[sym] || {}, m = S.markets[c.id] || {};
+  const p = price(sym) ?? d.at(-1)?.c;
+  const back = n => (d.length > n ? p / d[d.length - 1 - n].c - 1 : null);
+  const yr = d.slice(-365).map(k => k.c);
+  let peak = -Infinity, mdd = 0; for (const v of yr) { peak = Math.max(peak, v); mdd = Math.min(mdd, v / peak - 1); }
+  // correlação dos retornos diários com o BTC (90 dias)
+  let corr = null;
+  const b = S.daily.BTC;
+  if (b && sym !== 'BTC' && d.length > 91) {
+    const bm = new Map(b.map(k => [k.t, k.c])); const xs = [], ys = [];
+    for (let i = d.length - 90; i < d.length; i++) { const b0 = bm.get(d[i - 1].t), b1 = bm.get(d[i].t); if (b0 && b1) { xs.push(d[i].c / d[i - 1].c - 1); ys.push(b1 / b0 - 1); } }
+    if (xs.length > 30) { const mx = xs.reduce((s, x) => s + x, 0) / xs.length, my = ys.reduce((s, y) => s + y, 0) / ys.length;
+      let sxy = 0, sxx = 0, syy = 0; xs.forEach((x, i) => { sxy += (x - mx) * (ys[i] - my); sxx += (x - mx) ** 2; syy += (ys[i] - my) ** 2; });
+      corr = sxy / Math.sqrt(sxx * syy); }
+  } else if (sym === 'BTC') corr = 1;
+  const x = athAtl(c);
+  const s0 = start != null ? (S.cmp.range === '7D' ? S.hourly[sym] : d)?.find(k => k.t >= start)?.c : null;
+  const lots = S.positions.filter(q => q.sym === sym && q.status !== 'sold');
+  return {
+    price: p, ch24: t.change ?? null, r7: back(7), r30: back(30), r365: back(365),
+    ath: x ? p / x.ath - 1 : null, vol: a?.atrPct ?? null, mdd: yr.length > 30 ? mdd : null, corr,
+    mcap: m.marketCap ?? null, rank: m.rank ?? null, score: a?.ok ? a.score : null, verdict: a?.ok ? a.verdict : null,
+    win: a?.bt?.events ? a.bt.winRate : null, events: a?.bt?.events ?? 0,
+    k1000: s0 ? 1000 * (p / s0) * (1 - PARAMS.costPct) : null,
+    hold: lots.length ? lots.reduce((s2, q) => s2 + valueUsd(q, p), 0) : null,
+  };
+}
+
+function renderCompare() {
+  const C = S.cmp, days = CMP_RANGES[C.range];
+  const raw = C.syms.map(sym => ({ sym, pts: cmpSeries(sym, days) })).filter(x => x.pts.length > 1);
+  // início em comum (a moeda mais nova define o começo) para a comparação ser justa
+  const start = raw.length ? Math.max(...raw.map(x => x.pts[0].t)) : null;
+  const series = raw.map(({ sym, pts }) => {
+    const ps = pts.filter(p => p.t >= start); const p0 = ps[0]?.c;
+    const live = price(sym); if (live && ps.length) ps[ps.length - 1] = { ...ps[ps.length - 1], c: live };
+    return { label: sym, color: coinBySym[sym].color, points: ps.map(p => ({ t: p.t, v: p.c / p0 - 1 })) };
+  });
+  const M = Object.fromEntries(C.syms.map(sym => [sym, cmpMetrics(sym, start)]));
+  const unit = S.cur === 'BRL' && S.rate ? 1000 / S.rate : 1000;
+  const rows = [
+    ['Preço agora', v => money(v.price), null],
+    ['24 horas', v => pctCell(v.ch24), 'high', 'ch24'],
+    ['7 dias', v => pctCell(v.r7), 'high', 'r7'],
+    ['30 dias', v => pctCell(v.r30), 'high', 'r30'],
+    ['1 ano', v => pctCell(v.r365), 'high', 'r365'],
+    [`${curSym()} 1.000 no início do período`, v => v.k1000 == null ? '—' : `<span class="${cls(v.k1000 - 1000)}">${money(v.k1000 * unit / 1000)}</span>`, 'high', 'k1000'],
+    ['Distância da máx. histórica', v => pctCell(v.ath, 0), 'high', 'ath'],
+    ['Volatilidade diária', v => v.vol == null ? '—' : `${(v.vol * 100).toFixed(1).replace('.', ',')}%`, 'low', 'vol'],
+    ['Pior queda em 1 ano', v => pctCell(v.mdd, 0), 'high', 'mdd'],
+    ['Correlação com o BTC', v => v.corr == null ? '—' : v.corr.toFixed(2).replace('.', ','), null],
+    ['Valor de mercado', v => v.mcap ? money(v.mcap, { compact: true }) : '—', 'high', 'mcap'],
+    ['Distância do gatilho', v => v.score == null ? '—' : `<b style="color:${scoreColor(v.score)}">${v.score}</b>`, 'high', 'score'],
+    ['Sinal do app', v => v.verdict ? `<span class="chip ${VERDICT[v.verdict].cls}">${VERDICT[v.verdict].label}</span>` : '—', null],
+    ['Acerto do repique', v => v.win == null ? '—' : `${pct0(v.win)}<small> (${v.events})</small>`, 'high', 'win'],
+    ['Na sua carteira', v => v.hold == null ? '—' : money(v.hold), null],
+  ];
+  const bestOf = (key, dir) => { if (!dir) return null; const vals = C.syms.map(s2 => M[s2][key]).filter(x => x != null); if (vals.length < 2) return null; return dir === 'high' ? Math.max(...vals) : Math.min(...vals); };
+  const others = COINS.filter(c => !C.syms.includes(c.sym));
+  $('#cmpInner').innerHTML = `
+    <div class="sheet-nav"><button class="back" id="closeCmp" aria-label="Voltar"><svg width="20" height="20" viewBox="0 0 24 24"><path fill="currentColor" d="M15.4 7.4 14 6l-6 6 6 6 1.4-1.4L10.8 12z"/></svg></button><b style="font-size:17px">⚖️ Comparar moedas</b><span style="width:38px"></span></div>
+    <div class="cmp-pick">${C.syms.map(sym => { const c = coinBySym[sym]; return `<span class="cmp-chip" style="border-color:${c.color};background:${c.color}22">${coinIcon(c)}<b>${sym}</b>${C.syms.length > 2 ? `<button data-cmprm="${sym}" aria-label="Remover">×</button>` : ''}</span>`; }).join('')}
+      ${C.syms.length < 4 ? `<button class="cmp-add" data-cmpadd="1">＋ Moeda</button>` : ''}</div>
+    ${C.picking ? `<div class="cmp-list">${others.map(c => `<button class="cmp-opt" data-cmpput="${c.sym}">${coinIcon(c)}<span>${c.sym}</span></button>`).join('')}</div>` : ''}
+    <div class="card" style="padding:12px 0 8px">
+      <div class="cmp-legend" id="cmpLegend">${series.map(s2 => `<span><i style="background:${s2.color}"></i>${s2.label} <b class="${cls(s2.points.at(-1).v)}">${pct(s2.points.at(-1).v, 1)}</b></span>`).join('')}</div>
+      <canvas id="cmpChart" class="cmp-chart"></canvas>
+      <div class="ranges" style="margin:6px 12px 0">${Object.keys(CMP_RANGES).map(r => `<button data-cmprange="${r}" class="${r === C.range ? 'on' : ''}">${r === 'TUDO' ? 'Tudo' : r}</button>`).join('')}</div>
+      <p class="note" style="padding:0 14px">Variação em % desde ${start ? fmtDate(start) : '—'}${C.range === 'TUDO' ? ' (início da moeda mais nova, para comparar no mesmo período)' : ''}.</p>
+    </div>
+    <div class="cmp-table-wrap"><table class="cmp-table">
+      <thead><tr><th></th>${C.syms.map(sym => `<th style="color:${coinBySym[sym].color}" data-open="${sym}">${sym}</th>`).join('')}</tr></thead>
+      <tbody>${rows.map(([label, fmt, dir, key]) => { const best = key ? bestOf(key, dir) : null;
+        return `<tr><td>${label}</td>${C.syms.map(sym => `<td class="${best != null && M[sym][key] === best ? 'best' : ''}">${fmt(M[sym])}</td>`).join('')}</tr>`; }).join('')}</tbody>
+    </table></div>
+    <p class="note">Destaque verde = melhor da linha. Volatilidade = variação média diária (ATR). Correlação perto de 1 = anda junto com o Bitcoin; diversifica pouco. "Acerto do repique" = quantas vezes a estratégia do app deu certo nessa moeda (casos entre parênteses).</p>`;
+  const ch = new MultiLineChart($('#cmpChart'), {
+    onHover: h => { const el = $('#cmpLegend'); if (!el) return;
+      const vals = h ? h.values : series.map(s2 => ({ label: s2.label, color: s2.color, v: s2.points.at(-1).v }));
+      el.innerHTML = vals.map(x => `<span><i style="background:${x.color}"></i>${x.label} <b class="${cls(x.v ?? 0)}">${x.v == null ? '—' : pct(x.v, 1)}</b></span>`).join('') + (h ? `<span class="muted">${fmtDateTime(h.t, C.range === '7D' ? '7D' : '1A')}</span>` : ''); },
+  });
+  ch.setData(series);
+}
+const pctCell = (v, d = 1) => (v == null ? '—' : `<span class="${cls(v)}">${pct(v, d)}</span>`);
 
 function holdingCard(c) {
   const lots = S.positions.filter(p => p.sym === c.sym && p.status !== 'sold');
@@ -1252,6 +1354,12 @@ function switchView(v) {
 document.addEventListener('click', e => {
   const tab = e.target.closest('.tab'); if (tab) return switchView(tab.dataset.view);
   if (e.target.closest('#addAlert')) return addAlert();
+  const cmp = e.target.closest('[data-compare]'); if (cmp) return openCompare(cmp.dataset.compare || null);
+  if (e.target.closest('#closeCmp')) return closeCompare();
+  const crm = e.target.closest('[data-cmprm]'); if (crm) { S.cmp.syms = S.cmp.syms.filter(x => x !== crm.dataset.cmprm); return renderCompare(); }
+  if (e.target.closest('[data-cmpadd]')) { S.cmp.picking = !S.cmp.picking; return renderCompare(); }
+  const cput = e.target.closest('[data-cmpput]'); if (cput) { S.cmp.syms.push(cput.dataset.cmpput); S.cmp.picking = false; return renderCompare(); }
+  const crg = e.target.closest('[data-cmprange]'); if (crg) { S.cmp.range = crg.dataset.cmprange; return renderCompare(); }
   const alq = e.target.closest('[data-alq]');
   if (alq) { const p = price(S.detail); if (p) { $('#alertPrice').value = fmtNum(conv(p * (1 + alq.dataset.alq / 100))); alertHint(); } return; }
   const da = e.target.closest('[data-delalert]');
@@ -1302,7 +1410,7 @@ document.addEventListener('click', e => {
   const nm = e.target.closest('[data-notify]'); if (nm) { S.notifyMode = nm.dataset.notify; store.set('notifyMode', S.notifyMode); return renderSettings(); }
   const add = e.target.closest('[data-add]'); if (add) return addCoin(add.dataset.add);
   const rm = e.target.closest('[data-rmcoin]'); if (rm) return removeCoin(rm.dataset.rmcoin);
-  const open = e.target.closest('[data-open]'); if (open) return openDetail(open.dataset.open);
+  const open = e.target.closest('[data-open]'); if (open) { if (open.closest('#cmpSheet')) closeCompare(); return openDetail(open.dataset.open); }
   if (e.target.closest('#closeSheet')) return closeDetail();
   const rg = e.target.closest('[data-range]');
   if (rg) { S.range = rg.dataset.range; $$('#ranges button').forEach(b => b.classList.toggle('on', b === rg)); loadRange(); return; }

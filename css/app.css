@@ -320,3 +320,26 @@ textarea.code { width: 100%; min-height: 110px; background: var(--bg2); color: #
 .res-chip.open { background: rgba(255,255,255,.07); color: #c9c9d6; }
 .res-chip b { font-weight: 800; }
 .ex { font-style: normal; font-size: 11px; margin-left: -3px; }
+
+/* comparar moedas */
+.btn-row { display: flex; gap: 8px; } .btn-row .btn { flex: 1; font-size: 14px; padding: 13px 8px; }
+.cmp-pick { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0 4px; align-items: center; }
+.cmp-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px 4px 4px; border-radius: 999px; border: 1px solid; font-size: 14px; }
+.cmp-chip .coin-ic { width: 26px; height: 26px; flex-basis: 26px; font-size: 9px; }
+.cmp-chip button { color: var(--muted); font-size: 18px; line-height: 1; padding: 0 2px 0 4px; }
+.cmp-add { padding: 8px 14px; border-radius: 999px; background: var(--card2); color: var(--violet); font-weight: 700; font-size: 13px; }
+.cmp-list { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; background: var(--card); border-radius: 16px; padding: 10px; margin-top: 8px; max-height: 260px; overflow-y: auto; }
+.cmp-opt { display: flex; flex-direction: column; align-items: center; gap: 4px; font-size: 11px; font-weight: 700; padding: 6px 0; border-radius: 10px; }
+.cmp-opt:active { background: var(--card2); }
+.cmp-opt .coin-ic { width: 32px; height: 32px; flex-basis: 32px; font-size: 10px; }
+.cmp-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 0 14px 6px; font-size: 13px; min-height: 22px; }
+.cmp-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
+.cmp-chart { width: 100%; height: 230px; display: block; touch-action: pan-y; }
+.cmp-table-wrap { overflow-x: auto; margin-top: 14px; border-radius: var(--radius); background: var(--card); }
+.cmp-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.cmp-table th, .cmp-table td { padding: 9px 6px; text-align: right; border-top: 1px solid var(--line); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.cmp-table thead th { border-top: 0; font-size: 14px; font-weight: 800; }
+.cmp-table td:first-child, .cmp-table th:first-child { text-align: left; color: var(--muted); white-space: normal; min-width: 88px; max-width: 96px; position: sticky; z-index: 1; left: 0; background: var(--card); font-weight: 500; }
+.cmp-table td.best { background: rgba(46,230,166,.10); box-shadow: inset 0 0 0 1px rgba(46,230,166,.35); border-radius: 6px; }
+.cmp-table td small { color: var(--muted); }
+.cmp-table .chip { font-size: 9px; padding: 2px 5px; }

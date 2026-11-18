@@ -331,3 +331,68 @@ export function drawFngBars(canvas, data) {
     ctx.fillRect(i * bw + 1, h - bh, bw - 2, bh);
   });
 }
+
+// Várias linhas normalizadas (% desde o início do período), uma por moeda
+export class MultiLineChart {
+  constructor(canvas, { onHover } = {}) {
+    this.canvas = canvas; this.onHover = onHover; this.series = []; this.hover = null;
+    const move = e => { const r = canvas.getBoundingClientRect(); this.setHover((e.touches ? e.touches[0].clientX : e.clientX) - r.left); };
+    const end = () => { this.hover = null; this.draw(); this.onHover?.(null); };
+    canvas.addEventListener('touchstart', move, { passive: true });
+    canvas.addEventListener('touchmove', e => { e.preventDefault(); move(e); }, { passive: false });
+    canvas.addEventListener('touchend', end);
+    canvas.addEventListener('mousemove', move); canvas.addEventListener('mouseleave', end);
+    new ResizeObserver(() => this.draw()).observe(canvas);
+  }
+  // series: [{ label, color, points: [{t, v}] }] com v = variação (0.1 = +10%)
+  setData(series) {
+    this.series = series.filter(s => s.points.length > 1);
+    const ts = new Set(); this.series.forEach(s => s.points.forEach(p => ts.add(p.t)));
+    this.times = [...ts].sort((a, b) => a - b);
+    const start = performance.now();
+    const step = now => { this.progress = Math.min(1, (now - start) / 600); this.draw(); if (this.progress < 1) requestAnimationFrame(step); };
+    requestAnimationFrame(step);
+  }
+  setHover(x) {
+    if (!this.times?.length) return;
+    const t = this.t0 + ((x - this.pad) / (this.w - 2 * this.pad)) * (this.t1 - this.t0);
+    let best = this.times[0]; for (const tt of this.times) if (Math.abs(tt - t) < Math.abs(best - t)) best = tt;
+    if (best === this.hover) return;
+    this.hover = best; this.draw(); navigator.vibrate?.(1);
+    this.onHover?.({ t: best, values: this.series.map(s => ({ label: s.label, color: s.color, v: valAt(s.points, best) })) });
+  }
+  draw() {
+    const { ctx, w, h } = setupCanvas(this.canvas);
+    ctx.clearRect(0, 0, w, h);
+    if (!this.series.length) return;
+    this.w = w; const pad = this.pad = 8, top = 14, bot = 18;
+    let lo = 0, hi = 0; this.series.forEach(s => s.points.forEach(p => { lo = Math.min(lo, p.v); hi = Math.max(hi, p.v); }));
+    const span = (hi - lo) || 0.01; lo -= span * 0.08; hi += span * 0.08;
+    this.t0 = this.times[0]; this.t1 = this.times[this.times.length - 1];
+    const X = t => pad + ((t - this.t0) / ((this.t1 - this.t0) || 1)) * (w - 2 * pad);
+    const Y = v => top + (1 - (v - lo) / (hi - lo)) * (h - top - bot);
+    // linha do zero
+    ctx.strokeStyle = 'rgba(255,255,255,.25)'; ctx.setLineDash([4, 4]); ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(0, Y(0)); ctx.lineTo(w, Y(0)); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle = 'rgba(255,255,255,.45)'; ctx.font = '600 10px -apple-system, system-ui';
+    ctx.fillText(`${(hi * 100).toFixed(0)}%`, 2, top - 2); ctx.fillText(`${(lo * 100).toFixed(0)}%`, 2, h - 4);
+    const tMax = this.t0 + (this.t1 - this.t0) * (this.progress ?? 1);
+    for (const s of this.series) {
+      ctx.save(); ctx.shadowColor = s.color; ctx.shadowBlur = 8;
+      ctx.strokeStyle = s.color; ctx.lineWidth = 2.2; ctx.lineJoin = 'round';
+      ctx.beginPath(); let first = true;
+      for (const p of s.points) { if (p.t > tMax) break; first ? ctx.moveTo(X(p.t), Y(p.v)) : ctx.lineTo(X(p.t), Y(p.v)); first = false; }
+      ctx.stroke(); ctx.restore();
+      const lp = s.points[s.points.length - 1];
+      if ((this.progress ?? 1) >= 1) { ctx.fillStyle = s.color; ctx.beginPath(); ctx.arc(X(lp.t), Y(lp.v), 3.5, 0, 7); ctx.fill(); }
+    }
+    if (this.hover != null) {
+      const x = X(this.hover);
+      ctx.strokeStyle = 'rgba(255,255,255,.4)'; ctx.setLineDash([3, 3]); ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke(); ctx.setLineDash([]);
+      for (const s of this.series) { const v = valAt(s.points, this.hover); if (v == null) continue;
+        ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(x, Y(v), 5, 0, 7); ctx.fill();
+        ctx.fillStyle = s.color; ctx.beginPath(); ctx.arc(x, Y(v), 3.2, 0, 7); ctx.fill(); }
+    }
+  }
+}
+function valAt(points, t) { let v = null; for (const p of points) { if (p.t > t) break; v = p.v; } return v; }

@@ -108,5 +108,16 @@
   "rsi": 29.6,
   "drop30": -0.2996,
   "fng": 10
+ },
+ {
+  "t": 1795111845088,
+  "sym": "BTC",
+  "price": 62735.01,
+  "strong": true,
+  "regime": "correction",
+  "share": 0.433,
+  "rsi": 21.2,
+  "drop30": -0.254,
+  "fng": 10
  }
 ]

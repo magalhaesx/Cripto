@@ -86,5 +86,16 @@
   "rsi": 28.1,
   "drop30": -0.4142,
   "fng": 11
+ },
+ {
+  "t": 1795048984256,
+  "sym": "XRP",
+  "price": 0.9691,
+  "strong": false,
+  "regime": "correction",
+  "share": 0.367,
+  "rsi": 29.7,
+  "drop30": -0.2902,
+  "fng": 10
  }
 ]

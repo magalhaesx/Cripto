@@ -97,5 +97,16 @@
   "rsi": 29.7,
   "drop30": -0.2902,
   "fng": 10
+ },
+ {
+  "t": 1795077661600,
+  "sym": "BCH",
+  "price": 207.4,
+  "strong": false,
+  "regime": "correction",
+  "share": 0.3,
+  "rsi": 29.6,
+  "drop30": -0.2996,
+  "fng": 10
  }
 ]
